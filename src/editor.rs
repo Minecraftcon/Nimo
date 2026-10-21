@@ -18,12 +18,13 @@ use crate::theme::Palette;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptState {
     None,
-    SaveConfirm { input: String },
+    SaveConfirm { input: String, quit_after: bool },
     ExitConfirm,
 }
 
 pub struct Editor {
     pub lines: Vec<String>,
+    pub saved_lines: Vec<String>,
     pub cursor_row: usize, // 0-indexed in lines
     pub cursor_col: usize, // 0-indexed in current line (char count)
     pub row_offset: usize, // Viewport scroll top line
@@ -62,9 +63,11 @@ impl Editor {
 
         let (term_width, term_height) = terminal::size().unwrap_or((80, 24));
         let lang = Language::from_path(file_path.as_deref());
+        let saved_lines = lines.clone();
 
         Self {
             lines,
+            saved_lines,
             cursor_row: 0,
             cursor_col: 0,
             row_offset: 0,
@@ -81,6 +84,10 @@ impl Editor {
             term_height,
             prompt_state: PromptState::None,
         }
+    }
+
+    pub fn update_modified_status(&mut self) {
+        self.is_modified = self.lines != self.saved_lines;
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
@@ -388,8 +395,8 @@ impl Editor {
             )?;
 
             let status = match &self.prompt_state {
-                PromptState::SaveConfirm { input } => {
-                    format!(" File Name to Write [Enter or Y to confirm]: {}", input)
+                PromptState::SaveConfirm { input, .. } => {
+                    format!(" File Name to Write: {}", input)
                 }
                 PromptState::ExitConfirm => {
                     " Save modified buffer? [y/n] ".to_string()
@@ -418,7 +425,7 @@ impl Editor {
         if self.config.footer && current_terminal_row + 1 < self.term_height {
             let row1 = match &self.prompt_state {
                 PromptState::SaveConfirm { .. } => [
-                    ("Enter/Y", "Save"),
+                    ("Enter", "Save"),
                     ("^C", "Cancel"),
                     ("", ""),
                     ("", ""),
@@ -468,8 +475,8 @@ impl Editor {
 
         // 5. Place cursor at exact position
         let (screen_cursor_x, screen_cursor_y) = match &self.prompt_state {
-            PromptState::SaveConfirm { input } => {
-                let prompt_prefix = " File Name to Write [Enter or Y to confirm]: ";
+            PromptState::SaveConfirm { input, .. } => {
+                let prompt_prefix = " File Name to Write: ";
                 let cursor_x = (prompt_prefix.chars().count() + input.chars().count())
                     .min(self.term_width as usize - 1) as u16;
                 (cursor_x, status_row_y)
@@ -567,7 +574,8 @@ impl Editor {
         if let Event::Key(key) = event {
             // Handle prompt states first if active
             match &mut self.prompt_state {
-                PromptState::SaveConfirm { input } => {
+                PromptState::SaveConfirm { input, quit_after } => {
+                    let should_quit_after = *quit_after;
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C'))
                     {
@@ -587,18 +595,9 @@ impl Editor {
                             };
                             self.prompt_state = PromptState::None;
                             self.save_file_to(filename);
-                            return Ok(());
-                        }
-                        KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            let filename = if input.trim().is_empty() {
-                                self.file_path
-                                    .clone()
-                                    .unwrap_or_else(|| PathBuf::from("unnamed.txt"))
-                            } else {
-                                PathBuf::from(input.trim())
-                            };
-                            self.prompt_state = PromptState::None;
-                            self.save_file_to(filename);
+                            if should_quit_after {
+                                self.should_quit = true;
+                            }
                             return Ok(());
                         }
                         KeyCode::Char(c) => {
@@ -636,6 +635,7 @@ impl Editor {
                                 .unwrap_or_else(|| "unnamed.txt".to_string());
                             self.prompt_state = PromptState::SaveConfirm {
                                 input: current_name,
+                                quit_after: true,
                             };
                             return Ok(());
                         }
@@ -675,6 +675,7 @@ impl Editor {
                             .unwrap_or_else(|| "unnamed.txt".to_string());
                         self.prompt_state = PromptState::SaveConfirm {
                             input: current_name,
+                            quit_after: false,
                         };
                         return Ok(());
                     }
@@ -809,7 +810,7 @@ impl Editor {
 
         *line = chars.into_iter().collect();
         self.cursor_col += 1;
-        self.is_modified = true;
+        self.update_modified_status();
     }
 
     pub fn insert_newline(&mut self) {
@@ -830,7 +831,7 @@ impl Editor {
 
         self.cursor_row += 1;
         self.cursor_col = 0;
-        self.is_modified = true;
+        self.update_modified_status();
     }
 
     pub fn delete_backspace(&mut self) {
@@ -840,7 +841,7 @@ impl Editor {
             chars.remove(self.cursor_col - 1);
             *line = chars.into_iter().collect();
             self.cursor_col -= 1;
-            self.is_modified = true;
+            self.update_modified_status();
         } else if self.cursor_row > 0 {
             // Join with previous line
             let current_line = self.lines.remove(self.cursor_row);
@@ -848,7 +849,7 @@ impl Editor {
             let prev_line = &mut self.lines[self.cursor_row];
             self.cursor_col = prev_line.chars().count();
             prev_line.push_str(&current_line);
-            self.is_modified = true;
+            self.update_modified_status();
         }
     }
 
@@ -859,12 +860,12 @@ impl Editor {
             let mut chars: Vec<char> = line.chars().collect();
             chars.remove(self.cursor_col);
             *line = chars.into_iter().collect();
-            self.is_modified = true;
+            self.update_modified_status();
         } else if self.cursor_row + 1 < self.lines.len() {
             // Join with next line
             let next_line = self.lines.remove(self.cursor_row + 1);
             self.lines[self.cursor_row].push_str(&next_line);
-            self.is_modified = true;
+            self.update_modified_status();
         }
     }
 
@@ -881,14 +882,14 @@ impl Editor {
             }
             self.clamp_cursor_col();
         }
-        self.is_modified = true;
+        self.update_modified_status();
         self.set_status("Line cut to buffer");
     }
 
     pub fn paste_line(&mut self) {
         if let Some(ref text) = self.cut_buffer {
             self.lines.insert(self.cursor_row, text.clone());
-            self.is_modified = true;
+            self.update_modified_status();
             self.set_status("Pasted line from buffer");
         } else {
             self.set_status("Cut buffer is empty");
@@ -912,6 +913,7 @@ impl Editor {
 
         match fs::write(&path, content) {
             Ok(_) => {
+                self.saved_lines = self.lines.clone();
                 self.is_modified = false;
                 self.set_status(format!(
                     "Wrote {} lines to {}",
@@ -963,5 +965,39 @@ impl Editor {
             self.cursor_row += 1;
             self.clamp_cursor_col();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_modification_cleared_on_backspace() {
+        let mut editor = Editor::new(None, Config::default());
+        assert!(!editor.is_modified);
+
+        // Type "hello"
+        for c in "hello".chars() {
+            editor.insert_char(c);
+        }
+        assert!(editor.is_modified);
+
+        // Backspace 5 times to clear what was typed
+        for _ in 0..5 {
+            editor.delete_backspace();
+        }
+        // Buffer is now identical to original buffer -> is_modified MUST be false!
+        assert!(!editor.is_modified);
+    }
+
+    #[test]
+    fn test_modification_newline_and_backspace() {
+        let mut editor = Editor::new(None, Config::default());
+        editor.insert_newline();
+        assert!(editor.is_modified);
+
+        editor.delete_backspace();
+        assert!(!editor.is_modified);
     }
 }
