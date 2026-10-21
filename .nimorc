@@ -1,0 +1,64 @@
+# ==============================================================================
+#  .nimorc - Nimo Editor Configuration
+#  Written in Pure x86_64 Assembly without LibC
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Cursor Appearance
+# ------------------------------------------------------------------------------
+# BlinkingCursor: Set to true for a blinking terminal block cursor (\033[1 q),
+# or false for a steady non-blinking block cursor (\033[2 q).
+# Runtime hotkey toggle: Ctrl+B or Alt+B
+BlinkingCursor = true
+
+# ------------------------------------------------------------------------------
+# 2. Line Numbers & Dynamic Typing Display
+# ------------------------------------------------------------------------------
+# LineNumbers: Master toggle to show or hide line numbers in the gutter.
+# Runtime hotkey toggle: Ctrl+N or Alt+N
+LineNumbers = true
+
+# LineNumbersTypeOnly: When true, line numbers only appear on lines as you type
+# or on the active cursor line (blank lines below content have no numbers).
+LineNumbersTypeOnly = true
+
+# ------------------------------------------------------------------------------
+# 3. Gutter Separator & Styles
+# ------------------------------------------------------------------------------
+# Separator: Master toggle for the vertical gutter divider.
+# Runtime hotkey toggle: Ctrl+S or Alt+S
+Separator = true
+
+# SeparatorStyle: Style of the vertical gutter boundary.
+# Available options:
+#   - pipe    : Modern clean Unicode box bar " │ "
+#   - thin    : Classic ASCII pipe " | "
+#   - double  : Bold double-line Unicode bar " ║ "
+#   - dots    : Elegant dotted dashed divider " ┆ "
+#   - slash   : Stylized programmer slash " // "
+#   - none    : Invisible 3-space margin "   "
+# Runtime hotkey cycle: Ctrl+P or Alt+P
+SeparatorStyle = pipe
+CustomSeperator = '{line} :'
+
+# CustomSeparator: Custom format string for the line number and separator.
+# Use '{line}' as the placeholder for the line number.
+# Leave empty or commented out to use standard LineNumbers + SeparatorStyle.
+# Examples:
+#   CustomSeparator = '{line} :'   -> produces "  1 : "
+#   CustomSeparator = '{line} ]'   -> produces "  1 ] "
+#   CustomSeparator = '{line} |'   -> produces "  1 | "
+#   CustomSeparator = ''           -> default style
+# CustomSeparator = '{line} :'
+
+# ------------------------------------------------------------------------------
+# 4. Interface Bars (Disableable and Re-enablable)
+# ------------------------------------------------------------------------------
+# TopBar: Show or hide top Catppuccin Mauve header with filename and [*Modified] pill.
+TopBar = true
+
+# StatusBar: Show or hide bottom status bar with line/column and byte counts.
+StatusBar = true
+
+# Footer: Show or hide the bottom two Nano shortcut helper rows (^O, ^X, ^K, etc.).
+Footer = true

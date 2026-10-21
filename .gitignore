@@ -1,0 +1,8 @@
+/target
+/nimo
+*.tmp
+test.txt
+unnamed.txt
+asm_archive/build/
+asm_archive/nimo
+asm_archive/nimo_stripped
