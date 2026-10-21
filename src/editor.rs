@@ -58,7 +58,7 @@ pub fn get_help_lines() -> Vec<HelpLine> {
         HelpLine::Blank,
 
         HelpLine::Section("INTERFACE TOGGLES"),
-        HelpLine::Entry("M-L (or M-Z)", "Toggle WarpLine / Soft Wrap (wrap long lines with |_>)"),
+        HelpLine::Entry("M-L (or M-Z)", "Toggle WarpLine / Soft Wrap (wrap long lines with ↳)"),
         HelpLine::Entry("^N", "Toggle Line Numbers in gutter"),
         HelpLine::Entry("^S", "Toggle Gutter Separator divider"),
         HelpLine::Entry("^P", "Cycle Separator Style (pipe, thin, double, dots, slash, none)"),
@@ -76,6 +76,7 @@ pub fn get_help_lines() -> Vec<HelpLine> {
 
         HelpLine::Section("CONFIGURATION (.nimorc & .nanorc)"),
         HelpLine::Entry("WarpLine = true", "Enable soft line wrapping (nanorc: set softwrap)"),
+        HelpLine::Entry("WarpArrow = ↳ ", "Continuation line indicator (nanorc: set softwraparrow)"),
         HelpLine::Entry("CompactFooter = auto", "Adaptive mobile 1-row / desktop 2-row footer (nanorc: set minibar)"),
         HelpLine::Entry("Highlight = true", "Faint editing glow on cursor line (nanorc: set spotlight)"),
         HelpLine::Entry("HighlightColor = mauve", "Glow color: mauve, peach, blue, hex (nanorc: set stripecolor)"),
@@ -87,7 +88,7 @@ pub fn get_help_lines() -> Vec<HelpLine> {
     ]
 }
 
-pub const WRAP_ARROW: &str = "|_> ";
+pub const WRAP_ARROW: &str = "↳ ";
 
 #[derive(Debug, Clone)]
 pub struct DisplayRow {
@@ -900,9 +901,14 @@ impl Editor {
                         } else {
                             Palette::LAVENDER
                         };
+                        let arrow = if self.config.warp_arrow.is_empty() {
+                            WRAP_ARROW
+                        } else {
+                            &self.config.warp_arrow
+                        };
                         queue!(stdout, SetForegroundColor(arrow_fg))?;
-                        write!(stdout, "{}", WRAP_ARROW)?;
-                        rendered_w += WRAP_ARROW.chars().count();
+                        write!(stdout, "{}", arrow)?;
+                        rendered_w += arrow.chars().count();
                     }
 
                     let line = &self.lines[row_idx];
@@ -1443,7 +1449,12 @@ impl Editor {
                         } else {
                             screen_i as u16
                         };
-                        let prefix_w = if target_chunk > 0 { WRAP_ARROW.chars().count() } else { 0 };
+                        let arrow_w = if self.config.warp_arrow.is_empty() {
+                            WRAP_ARROW.chars().count()
+                        } else {
+                            self.config.warp_arrow.chars().count()
+                        };
+                        let prefix_w = if target_chunk > 0 { arrow_w } else { 0 };
                         let x = (gutter_w + prefix_w + col_in_chunk).min(self.term_width as usize - 1) as u16;
                         (x, y)
                     } else {
@@ -2924,7 +2935,7 @@ mod tests {
 
     #[test]
     fn test_line_wrap_chunks_and_cursor_pos() {
-        let available_w = 20; // 20 cols. prefix "|_> " is 4 cols. cont_cap = 16 cols.
+        let available_w = 20; // 20 cols. prefix "↳ " is 2 cols. cont_cap = 18 cols.
 
         // Short line: 10 chars
         let chunks_short = line_wrap_chunks("hello rust", false, 0, available_w);
@@ -2935,20 +2946,20 @@ mod tests {
         let long_line = "0123456789012345678901234567890123456789"; // 40 chars
         let chunks_long = line_wrap_chunks(long_line, false, 0, available_w);
         // Chunk 0: 0..20 (20 chars)
-        // Chunk 1: 20..36 (16 chars)
-        // Chunk 2: 36..40 (4 chars)
+        // Chunk 1: 20..38 (18 chars)
+        // Chunk 2: 38..40 (2 chars)
         assert_eq!(chunks_long.len(), 3);
         assert_eq!(chunks_long[0], (0, 20, false));
-        assert_eq!(chunks_long[1], (20, 36, true));
-        assert_eq!(chunks_long[2], (36, 40, true));
+        assert_eq!(chunks_long[1], (20, 38, true));
+        assert_eq!(chunks_long[2], (38, 40, true));
 
         // Test cursor position mapping
         assert_eq!(cursor_to_wrap_pos(0, available_w), (0, 0));
         assert_eq!(cursor_to_wrap_pos(19, available_w), (0, 19));
         assert_eq!(cursor_to_wrap_pos(20, available_w), (1, 0));
         assert_eq!(cursor_to_wrap_pos(25, available_w), (1, 5));
-        assert_eq!(cursor_to_wrap_pos(36, available_w), (2, 0));
-        assert_eq!(cursor_to_wrap_pos(40, available_w), (2, 4));
+        assert_eq!(cursor_to_wrap_pos(38, available_w), (2, 0));
+        assert_eq!(cursor_to_wrap_pos(40, available_w), (2, 2));
     }
 
     #[test]

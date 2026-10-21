@@ -83,6 +83,7 @@ pub struct Config {
     pub highlight_opacity: f32,
     pub auto_completions: bool,
     pub warp_line: bool,
+    pub warp_arrow: String,
 }
 
 impl Default for Config {
@@ -103,6 +104,7 @@ impl Default for Config {
             highlight_opacity: 0.08,
             auto_completions: true,
             warp_line: false,
+            warp_arrow: "↳ ".to_string(),
         }
     }
 }
@@ -239,6 +241,17 @@ impl Config {
             "softwrap" | "wrap" | "warpline" | "warp_line" | "wrapline" | "wrap_line" | "wraplines" => {
                 self.warp_line = if val.is_empty() { true } else { parse_bool(val, true) };
             }
+            "softwraparrow" | "wraparrow" => {
+                let unquoted = unquote_str(val);
+                if !unquoted.is_empty() {
+                    let trimmed = val.trim();
+                    if !trimmed.starts_with('"') && !trimmed.starts_with('\'') && !unquoted.ends_with(' ') {
+                        self.warp_arrow = format!("{} ", unquoted);
+                    } else {
+                        self.warp_arrow = unquoted;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -290,6 +303,17 @@ impl Config {
             }
             "warpline" | "warp_line" | "wrapline" | "wrap_line" | "wraplines" | "wrap_lines" | "softwrap" | "soft_wrap" => {
                 self.warp_line = parse_bool(val, self.warp_line);
+            }
+            "warparrow" | "warp_arrow" | "wraparrow" | "wrap_arrow" | "softwraparrow" | "soft_wrap_arrow" => {
+                let unquoted = unquote_str(val);
+                if !unquoted.is_empty() {
+                    let trimmed = val.trim();
+                    if !trimmed.starts_with('"') && !trimmed.starts_with('\'') && !unquoted.ends_with(' ') {
+                        self.warp_arrow = format!("{} ", unquoted);
+                    } else {
+                        self.warp_arrow = unquoted;
+                    }
+                }
             }
             "highlight" | "linehighlight" | "spotlight" => {
                 self.highlight_enabled = parse_bool(val, self.highlight_enabled);
@@ -531,6 +555,12 @@ mod tests {
 
         cfg.parse("unset softwrap");
         assert!(!cfg.warp_line);
+
+        assert_eq!(cfg.warp_arrow, "↳ ");
+        cfg.parse("WarpArrow = └─> ");
+        assert_eq!(cfg.warp_arrow, "└─> ");
+        cfg.parse("set softwraparrow \"↳ \"");
+        assert_eq!(cfg.warp_arrow, "↳ ");
     }
 }
 
