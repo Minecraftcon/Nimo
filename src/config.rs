@@ -59,6 +59,13 @@ impl SeparatorStyle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactFooterMode {
+    Auto,   // Adaptive: 1 row on small / mobile / short screens (term_height <= 18), 2 rows on desktop
+    Always, // Always 1 compact row
+    Never,  // Always 2 rows (classic nano)
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub blinking_cursor: bool,
@@ -70,6 +77,7 @@ pub struct Config {
     pub top_bar: bool,
     pub status_bar: bool,
     pub footer: bool,
+    pub compact_footer: CompactFooterMode,
     pub highlight_enabled: bool,
     pub highlight_color: Color,
     pub highlight_opacity: f32,
@@ -88,6 +96,7 @@ impl Default for Config {
             top_bar: true,
             status_bar: true,
             footer: true,
+            compact_footer: CompactFooterMode::Auto,
             highlight_enabled: true,
             highlight_color: Palette::MAUVE,
             highlight_opacity: 0.08,
@@ -222,6 +231,9 @@ impl Config {
             "autocompletions" | "auto_completions" | "autopairs" | "auto_pairs" => {
                 self.auto_completions = if val.is_empty() { true } else { parse_bool(val, true) };
             }
+            "minibar" | "compactfooter" | "compact" => {
+                self.compact_footer = CompactFooterMode::Always;
+            }
             _ => {}
         }
     }
@@ -243,12 +255,28 @@ impl Config {
             "autocompletions" | "auto_completions" | "autopairs" | "auto_pairs" => {
                 self.auto_completions = false;
             }
+            "minibar" | "compactfooter" | "compact" => {
+                self.compact_footer = CompactFooterMode::Never;
+            }
             _ => {}
         }
     }
 
     fn apply_key_value(&mut self, key: &str, val: &str) {
         match key {
+            "compactfooter" | "compact_footer" | "minibar" => {
+                match val.to_lowercase().as_str() {
+                    "always" | "true" | "yes" | "1" | "on" => {
+                        self.compact_footer = CompactFooterMode::Always;
+                    }
+                    "never" | "false" | "no" | "0" | "off" => {
+                        self.compact_footer = CompactFooterMode::Never;
+                    }
+                    _ => {
+                        self.compact_footer = CompactFooterMode::Auto;
+                    }
+                }
+            }
             "autocompletions" | "auto_completions" | "autopairs" | "auto_pairs" => {
                 self.auto_completions = parse_bool(val, self.auto_completions);
             }
@@ -451,4 +479,26 @@ mod tests {
         let blended = cfg.active_line_bg(Color::Rgb { r: 100, g: 100, b: 100 });
         assert_eq!(blended, Color::Rgb { r: 150, g: 150, b: 150 });
     }
+
+    #[test]
+    fn test_compact_footer_config() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.compact_footer, CompactFooterMode::Auto);
+
+        cfg.parse("CompactFooter = true");
+        assert_eq!(cfg.compact_footer, CompactFooterMode::Always);
+
+        cfg.parse("CompactFooter = false");
+        assert_eq!(cfg.compact_footer, CompactFooterMode::Never);
+
+        cfg.parse("CompactFooter = auto");
+        assert_eq!(cfg.compact_footer, CompactFooterMode::Auto);
+
+        cfg.parse("set minibar");
+        assert_eq!(cfg.compact_footer, CompactFooterMode::Always);
+
+        cfg.parse("unset minibar");
+        assert_eq!(cfg.compact_footer, CompactFooterMode::Never);
+    }
 }
+

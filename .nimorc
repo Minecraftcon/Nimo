@@ -89,4 +89,16 @@ HighlightOpacity = 0.08
 # nanorc syntax: set autocompletions / unset autocompletions
 AutoCompletions = true
 
+# ------------------------------------------------------------------------------
+# 7. Bottom Helper Commands & Compact Footer (Android & Desktop Adaptive)
+# ------------------------------------------------------------------------------
+# CompactFooter: Controls shortcut helper command rows at the bottom of the screen.
+#   - auto   : Automatically uses 1 compact row on mobile / Android Termux screens
+#              (height <= 18) or when virtual keyboard is active, and 2 rows on
+#              desktop / larger terminals (height > 18).
+#   - true   : Always use 1 compact row (nano minibar style, saving vertical space).
+#   - false  : Always use 2 full rows.
+# nanorc syntax: set minibar (compact) / unset minibar (2 rows)
+CompactFooter = auto
+
 

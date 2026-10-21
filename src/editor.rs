@@ -11,7 +11,7 @@ use crossterm::{
     terminal,
 };
 
-use crate::config::Config;
+use crate::config::{CompactFooterMode, Config};
 use crate::syntax::{highlight_line, Language};
 use crate::theme::Palette;
 
@@ -274,6 +274,26 @@ impl Editor {
         (current_idx, total)
     }
 
+    /// Number of footer rows to render (0, 1, or 2), adapting to screen size
+    pub fn footer_height(&self) -> usize {
+        if !self.config.footer {
+            return 0;
+        }
+        match self.config.compact_footer {
+            CompactFooterMode::Always => 1,
+            CompactFooterMode::Never => 2,
+            CompactFooterMode::Auto => {
+                // Adaptive: on short Android / mobile screens (height <= 18), use 1 row.
+                // On normal desktop screens, use 2 rows (like classic nano).
+                if self.term_height <= 18 {
+                    1
+                } else {
+                    2
+                }
+            }
+        }
+    }
+
     /// Height available for text rows
     pub fn text_area_height(&self) -> usize {
         let mut h = self.term_height as usize;
@@ -283,9 +303,8 @@ impl Editor {
         if self.config.status_bar && h > 0 {
             h -= 1;
         }
-        if self.config.footer && h >= 2 {
-            h -= 2;
-        }
+        let f_h = self.footer_height();
+        h = h.saturating_sub(f_h);
         h.max(1)
     }
 
@@ -710,71 +729,110 @@ impl Editor {
         }
 
         // 4. Footer (Nano Shortcuts)
-        if self.config.footer && current_terminal_row + 1 < self.term_height {
-            let row1 = match &self.prompt_state {
-                PromptState::SaveConfirm { .. } => [
-                    ("Enter", "Save"),
-                    ("^C", "Cancel"),
-                    ("", ""),
-                    ("", ""),
-                    ("", ""),
-                    ("", ""),
-                ],
-                PromptState::ExitConfirm => [
-                    ("Y", "Yes"),
-                    ("N", "No"),
-                    ("^C", "Cancel"),
-                    ("", ""),
-                    ("", ""),
-                    ("", ""),
-                ],
-                PromptState::Search { .. } => [
-                    ("Enter", "NextMatch"),
-                    ("Up", "PrevMatch"),
-                    ("Down", "NextMatch"),
-                    ("Esc", "Stop/Edit"),
-                    ("^C", "Cancel"),
-                    ("", ""),
-                ],
-                PromptState::None => [
-                    ("^O", "WriteOut"),
-                    ("^X", "Exit"),
-                    ("^K", "CutLine"),
-                    ("^U", "Paste"),
-                    ("^N", "ToggleNum"),
-                    ("^S", "ToggleSep"),
-                ],
-            };
+        let f_h = self.footer_height();
+        if f_h > 0 && current_terminal_row + f_h as u16 <= self.term_height {
+            if f_h == 1 {
+                let row = match &self.prompt_state {
+                    PromptState::SaveConfirm { .. } => [
+                        ("Enter", "Save"),
+                        ("^C", "Cancel"),
+                        ("", ""),
+                        ("", ""),
+                        ("", ""),
+                        ("", ""),
+                    ],
+                    PromptState::ExitConfirm => [
+                        ("Y", "Yes"),
+                        ("N", "No"),
+                        ("^C", "Cancel"),
+                        ("", ""),
+                        ("", ""),
+                        ("", ""),
+                    ],
+                    PromptState::Search { .. } => [
+                        ("Enter", "Next"),
+                        ("Up", "Prev"),
+                        ("Esc", "Done"),
+                        ("^C", "Cancel"),
+                        ("M-W", "Next"),
+                        ("M-Q", "Prev"),
+                    ],
+                    PromptState::None => [
+                        ("^O", "Save"),
+                        ("^X", "Exit"),
+                        ("^W", "WhereIs"),
+                        ("M-W", "Next"),
+                        ("M-Q", "Prev"),
+                        ("^K", "Cut"),
+                    ],
+                };
+                self.render_shortcut_row(stdout, current_terminal_row, &row)?;
+            } else {
+                let row1 = match &self.prompt_state {
+                    PromptState::SaveConfirm { .. } => [
+                        ("Enter", "Save"),
+                        ("^C", "Cancel"),
+                        ("", ""),
+                        ("", ""),
+                        ("", ""),
+                        ("", ""),
+                    ],
+                    PromptState::ExitConfirm => [
+                        ("Y", "Yes"),
+                        ("N", "No"),
+                        ("^C", "Cancel"),
+                        ("", ""),
+                        ("", ""),
+                        ("", ""),
+                    ],
+                    PromptState::Search { .. } => [
+                        ("Enter", "Next"),
+                        ("Up", "Prev"),
+                        ("Down", "Next"),
+                        ("Esc", "Done"),
+                        ("^C", "Cancel"),
+                        ("", ""),
+                    ],
+                    PromptState::None => [
+                        ("^O", "Save"),
+                        ("^X", "Exit"),
+                        ("^W", "WhereIs"),
+                        ("^K", "Cut"),
+                        ("^U", "Paste"),
+                        ("M-W", "Next"),
+                    ],
+                };
 
-            let row2 = match &self.prompt_state {
-                PromptState::Search { .. } => [
-                    ("Alt+W", "NextMatch"),
-                    ("Alt+Q", "PrevMatch"),
-                    ("", ""),
-                    ("", ""),
-                    ("", ""),
-                    ("", ""),
-                ],
-                PromptState::None => [
-                    ("Alt+W", "FindNext"),
-                    ("Alt+Q", "FindPrev"),
-                    ("^C", "CurPos"),
-                    ("^W", "WhereIs"),
-                    ("^B", "BlinkCur"),
-                    ("^P", "SepStyle"),
-                ],
-                _ => [
-                    ("", ""),
-                    ("", ""),
-                    ("", ""),
-                    ("", ""),
-                    ("", ""),
-                    ("", ""),
-                ],
-            };
+                let row2 = match &self.prompt_state {
+                    PromptState::Search { .. } => [
+                        ("M-W", "Next"),
+                        ("M-Q", "Prev"),
+                        ("F3", "Next"),
+                        ("S-F3", "Prev"),
+                        ("", ""),
+                        ("", ""),
+                    ],
+                    PromptState::None => [
+                        ("M-Q", "Prev"),
+                        ("^C", "Pos"),
+                        ("^N", "Num"),
+                        ("^S", "Sep"),
+                        ("^P", "Style"),
+                        ("^B", "Blink"),
+                    ],
+                    _ => [
+                        ("", ""),
+                        ("", ""),
+                        ("", ""),
+                        ("", ""),
+                        ("", ""),
+                        ("", ""),
+                    ],
+                };
 
-            self.render_shortcut_row(stdout, current_terminal_row, &row1)?;
-            self.render_shortcut_row(stdout, current_terminal_row + 1, &row2)?;
+                self.render_shortcut_row(stdout, current_terminal_row, &row1)?;
+                self.render_shortcut_row(stdout, current_terminal_row + 1, &row2)?;
+            }
         }
 
         // 5. Place cursor at exact position
@@ -842,47 +900,92 @@ impl Editor {
         y: u16,
         items: &[(&str, &str)],
     ) -> io::Result<()> {
+        let active_items: Vec<(&str, &str)> = items
+            .iter()
+            .copied()
+            .filter(|(k, _)| !k.trim().is_empty())
+            .collect();
+
+        let term_w = self.term_width as usize;
         queue!(
             stdout,
             cursor::MoveTo(0, y),
-            SetBackgroundColor(Palette::MANTLE),
-            SetForegroundColor(Palette::SUBTEXT0)
+            SetBackgroundColor(Palette::MANTLE)
         )?;
 
-        let mut row_str = String::new();
-        let slot_w = (self.term_width as usize / items.len()).max(8);
-
-        for (key, desc) in items {
-            let item_str = format!("{:<2} {:<7}", key, desc);
-            let padded = format!("{:<width$}", item_str, width = slot_w);
-            row_str.push_str(&padded);
+        if active_items.is_empty() || term_w == 0 {
+            write!(stdout, "{}", " ".repeat(term_w))?;
+            return Ok(());
         }
 
-        let remaining = (self.term_width as usize).saturating_sub(row_str.chars().count());
-        row_str.push_str(&" ".repeat(remaining));
+        // Adaptive column count: Ensure items never overlap or wrap.
+        // Minimum comfortable slot width is 7 characters (e.g. "^O Save")
+        let max_fit = (term_w / 7).max(1);
+        let count = active_items.len().min(max_fit);
+        let items_to_show = &active_items[..count];
 
-        // Highlight the shortcut keys in Peach
+        let slot_w = term_w / count;
         let mut col_idx = 0;
-        for (key, desc) in items {
-            let k_len = key.chars().count();
 
+        for (i, (key, desc)) in items_to_show.iter().enumerate() {
+            let this_slot_w = if i + 1 == count {
+                term_w.saturating_sub(col_idx)
+            } else {
+                slot_w
+            };
+
+            let k_trimmed = key.trim();
+            let k_len = k_trimmed.chars().count();
+            let d_len = desc.chars().count();
+
+            // Total text length: k_len + 1 (space) + d_len
+            let needed = k_len + 1 + d_len;
+            let display_desc = if needed > this_slot_w {
+                let available_d = this_slot_w.saturating_sub(k_len + 1);
+                if available_d > 0 {
+                    desc.chars().take(available_d).collect::<String>()
+                } else {
+                    String::new()
+                }
+            } else {
+                desc.to_string()
+            };
+
+            // 1. Move to column and write key in Peach
             queue!(
                 stdout,
                 cursor::MoveTo(col_idx as u16, y),
                 SetBackgroundColor(Palette::MANTLE),
                 SetForegroundColor(Palette::PEACH)
             )?;
-            write!(stdout, "{}", key)?;
+            write!(stdout, "{}", k_trimmed)?;
 
-            queue!(
-                stdout,
-                cursor::MoveTo((col_idx + k_len + 1) as u16, y),
-                SetBackgroundColor(Palette::MANTLE),
-                SetForegroundColor(Palette::TEXT)
-            )?;
-            write!(stdout, "{}", desc)?;
+            // 2. Write space + description in Text color
+            let mut written_w = k_len;
+            if !display_desc.is_empty() {
+                queue!(
+                    stdout,
+                    SetBackgroundColor(Palette::MANTLE),
+                    SetForegroundColor(Palette::TEXT)
+                )?;
+                write!(stdout, " {}", display_desc)?;
+                written_w += 1 + display_desc.chars().count();
+            }
 
-            col_idx += slot_w;
+            // 3. Pad remaining space in this slot with Mantle spaces
+            if this_slot_w > written_w {
+                let pad = " ".repeat(this_slot_w - written_w);
+                queue!(stdout, SetBackgroundColor(Palette::MANTLE))?;
+                write!(stdout, "{}", pad)?;
+            }
+
+            col_idx += this_slot_w;
+        }
+
+        // Fill any trailing space on the line
+        if col_idx < term_w {
+            queue!(stdout, SetBackgroundColor(Palette::MANTLE))?;
+            write!(stdout, "{}", " ".repeat(term_w - col_idx))?;
         }
 
         Ok(())
@@ -2016,5 +2119,36 @@ mod tests {
 
         assert_eq!(editor.last_search, None);
         assert_eq!(editor.status_message, "[Search highlights cleared]");
+    }
+
+    #[test]
+    fn test_adaptive_footer_height() {
+        let mut editor = Editor::new(None, Config::default());
+        editor.config.footer = true;
+
+        // Auto mode: <= 18 rows is 1 (compact on mobile/Android), > 18 is 2 (desktop)
+        editor.config.compact_footer = CompactFooterMode::Auto;
+        editor.term_height = 14;
+        assert_eq!(editor.footer_height(), 1);
+
+        editor.term_height = 18;
+        assert_eq!(editor.footer_height(), 1);
+
+        editor.term_height = 24;
+        assert_eq!(editor.footer_height(), 2);
+
+        // Always compact mode: always 1
+        editor.config.compact_footer = CompactFooterMode::Always;
+        editor.term_height = 50;
+        assert_eq!(editor.footer_height(), 1);
+
+        // Never compact mode: always 2
+        editor.config.compact_footer = CompactFooterMode::Never;
+        editor.term_height = 10;
+        assert_eq!(editor.footer_height(), 2);
+
+        // Footer disabled
+        editor.config.footer = false;
+        assert_eq!(editor.footer_height(), 0);
     }
 }
