@@ -195,52 +195,37 @@ impl Editor {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "[New File]".to_string());
 
-            let left_text = "NIMO 1.0.0";
-            let center_title = if self.is_modified {
-                format!("File: {} [Modified]", filename)
-            } else {
-                format!("File: {}", filename)
-            };
-
+            let file_str = format!("File: {}", filename);
+            let mod_str = if self.is_modified { " [Modified]" } else { "" };
+            let full_title = format!("{}{}", file_str, mod_str);
             let width = self.term_width as usize;
 
-            // Render top bar background
+            // Render highlighted top bar background (Mauve accent)
             queue!(
                 stdout,
                 cursor::MoveTo(0, current_terminal_row),
-                SetBackgroundColor(Palette::SURFACE0),
-                SetForegroundColor(Palette::TEXT)
+                SetBackgroundColor(Palette::MAUVE),
+                SetForegroundColor(Palette::CRUST)
             )?;
             write!(stdout, "{}", " ".repeat(width))?;
 
-            // Render left NIMO badge (Mauve accent)
-            if width >= 12 {
-                queue!(
-                    stdout,
-                    cursor::MoveTo(2, current_terminal_row),
-                    SetBackgroundColor(Palette::SURFACE0),
-                    SetForegroundColor(Palette::MAUVE)
-                )?;
-                write!(stdout, "{}", left_text)?;
-            }
-
-            // Render perfectly centered File: <name> (Text color, Red accent if modified)
-            let center_len = center_title.chars().count();
-            if center_len + 4 < width {
+            // Render centered File: <name> [Modified]
+            let center_len = full_title.chars().count();
+            if center_len < width {
                 let start_x = ((width.saturating_sub(center_len)) / 2) as u16;
                 queue!(
                     stdout,
                     cursor::MoveTo(start_x, current_terminal_row),
-                    SetBackgroundColor(Palette::SURFACE0),
-                    SetForegroundColor(Palette::TEXT)
+                    SetBackgroundColor(Palette::MAUVE),
+                    SetForegroundColor(Palette::CRUST)
                 )?;
-                let file_prefix = format!("File: {}", filename);
-                write!(stdout, "{}", file_prefix)?;
+                write!(stdout, "{}", file_str)?;
 
                 if self.is_modified {
                     queue!(
                         stdout,
-                        SetForegroundColor(Palette::RED)
+                        SetBackgroundColor(Palette::RED),
+                        SetForegroundColor(Palette::CRUST)
                     )?;
                     write!(stdout, " [Modified]")?;
                 }
@@ -401,7 +386,7 @@ impl Editor {
                     format!(" File Name to Write [Enter or Y to confirm]: {}", input)
                 }
                 PromptState::ExitConfirm => {
-                    " Save modified buffer? ".to_string()
+                    " Save modified buffer? [y/n] ".to_string()
                 }
                 PromptState::None => {
                     if let Some(time) = self.status_time {
@@ -484,7 +469,7 @@ impl Editor {
                 (cursor_x, status_row_y)
             }
             PromptState::ExitConfirm => {
-                let prompt_str = " Save modified buffer? ";
+                let prompt_str = " Save modified buffer? [y/n] ";
                 let cursor_x = prompt_str.chars().count().min(self.term_width as usize - 1) as u16;
                 (cursor_x, status_row_y)
             }
