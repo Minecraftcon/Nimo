@@ -82,6 +82,7 @@ pub struct Config {
     pub highlight_color: Color,
     pub highlight_opacity: f32,
     pub auto_completions: bool,
+    pub warp_line: bool,
 }
 
 impl Default for Config {
@@ -101,6 +102,7 @@ impl Default for Config {
             highlight_color: Palette::MAUVE,
             highlight_opacity: 0.08,
             auto_completions: true,
+            warp_line: false,
         }
     }
 }
@@ -234,6 +236,9 @@ impl Config {
             "minibar" | "compactfooter" | "compact" => {
                 self.compact_footer = CompactFooterMode::Always;
             }
+            "softwrap" | "wrap" | "warpline" | "warp_line" | "wrapline" | "wrap_line" | "wraplines" => {
+                self.warp_line = if val.is_empty() { true } else { parse_bool(val, true) };
+            }
             _ => {}
         }
     }
@@ -258,6 +263,9 @@ impl Config {
             "minibar" | "compactfooter" | "compact" => {
                 self.compact_footer = CompactFooterMode::Never;
             }
+            "softwrap" | "wrap" | "nowrap" | "warpline" | "warp_line" | "wrapline" | "wrap_line" | "wraplines" => {
+                self.warp_line = false;
+            }
             _ => {}
         }
     }
@@ -279,6 +287,9 @@ impl Config {
             }
             "autocompletions" | "auto_completions" | "autopairs" | "auto_pairs" => {
                 self.auto_completions = parse_bool(val, self.auto_completions);
+            }
+            "warpline" | "warp_line" | "wrapline" | "wrap_line" | "wraplines" | "wrap_lines" | "softwrap" | "soft_wrap" => {
+                self.warp_line = parse_bool(val, self.warp_line);
             }
             "highlight" | "linehighlight" | "spotlight" => {
                 self.highlight_enabled = parse_bool(val, self.highlight_enabled);
@@ -499,6 +510,27 @@ mod tests {
 
         cfg.parse("unset minibar");
         assert_eq!(cfg.compact_footer, CompactFooterMode::Never);
+    }
+
+    #[test]
+    fn test_warp_line_config() {
+        let mut cfg = Config::default();
+        assert!(!cfg.warp_line);
+
+        cfg.parse("WarpLine = true");
+        assert!(cfg.warp_line);
+
+        cfg.parse("WarpLine = false");
+        assert!(!cfg.warp_line);
+
+        cfg.parse("WrapLines = on");
+        assert!(cfg.warp_line);
+
+        cfg.parse("set softwrap");
+        assert!(cfg.warp_line);
+
+        cfg.parse("unset softwrap");
+        assert!(!cfg.warp_line);
     }
 }
 

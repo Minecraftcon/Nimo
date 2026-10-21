@@ -101,4 +101,14 @@ AutoCompletions = true
 # nanorc syntax: set minibar (compact) / unset minibar (2 rows)
 CompactFooter = auto
 
+# ------------------------------------------------------------------------------
+# 8. Line Wrapping / Soft Wrap (WarpLine)
+# ------------------------------------------------------------------------------
+# WarpLine: When true, long lines that extend beyond the screen width are wrapped
+# onto the next visual line with an indicator arrow (|_>).
+# Runtime hotkey toggle: Alt+L or Alt+Z
+# nanorc syntax: set softwrap / unset softwrap
+WarpLine = true
+
+
 
