@@ -51,8 +51,40 @@ fn main() -> io::Result<()> {
     // 1. Load configuration from .nimorc
     let config = Config::load();
 
-    // 2. Parse command line arguments for filename
+    // 2. Parse command line arguments
     let args: Vec<String> = env::args().collect();
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "-h" | "--help" => {
+                println!("Nimo 1.0.0 - Nano-Inspired Modern Terminal Editor in Rust");
+                println!();
+                println!("USAGE:");
+                println!("  nimo [OPTIONS] [FILE]");
+                println!();
+                println!("OPTIONS:");
+                println!("  -h, --help       Print help information");
+                println!("  -v, --version    Print version information");
+                println!();
+                println!("SHORTCUTS:");
+                println!("  Ctrl+O           WriteOut (Save active file)");
+                println!("  Ctrl+X           Exit editor (prompts if unsaved)");
+                println!("  Ctrl+K           Cut line");
+                println!("  Ctrl+U           Paste line");
+                println!("  Ctrl+N           Toggle line numbers");
+                println!("  Ctrl+S           Toggle vertical separator");
+                println!("  Ctrl+B           Toggle cursor blink");
+                println!("  Ctrl+P           Cycle separator styles");
+                println!("  Ctrl+C           Show cursor position");
+                return Ok(());
+            }
+            "-v" | "--version" => {
+                println!("nimo 1.0.0");
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     let file_path = if args.len() > 1 {
         Some(PathBuf::from(&args[1]))
     } else {

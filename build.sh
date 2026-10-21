@@ -126,29 +126,37 @@ build_project() {
 # 4. Optional Installation
 # ------------------------------------------------------------------------------
 install_binary() {
-    local target_dir="${1:-$DEFAULT_INSTALL_DIR}"
+    local target_dir="${1:-}"
+
+    if [ -z "$target_dir" ]; then
+        if [ "$IS_TERMUX" = true ]; then
+            target_dir="${PREFIX:-/data/data/com.termux/files/usr}/bin"
+        elif [ "$(id -u)" -eq 0 ] || [ -w "/usr/local/bin" ] || sudo -n true 2>/dev/null; then
+            target_dir="/usr/local/bin"
+        else
+            # Default to standard user binary directory (~/.local/bin) if /usr/local/bin requires sudo
+            target_dir="$HOME/.local/bin"
+        fi
+    fi
+
     log_step "Installing Nimo to ${target_dir}..."
 
     if [ ! -f "./nimo" ]; then
         build_project
     fi
 
-    if [ "$IS_TERMUX" = true ]; then
-        mkdir -p "$target_dir"
+    mkdir -p "$target_dir" 2>/dev/null || true
+
+    if [ "$IS_TERMUX" = true ] || [ -w "$target_dir" ]; then
         cp -f ./nimo "$target_dir/nimo"
         chmod +x "$target_dir/nimo"
     else
-        if [ -w "$target_dir" ]; then
-            cp -f ./nimo "$target_dir/nimo"
-            chmod +x "$target_dir/nimo"
-        else
-            log_info "Root permissions required to install to $target_dir. Prompting sudo..."
-            sudo cp -f ./nimo "$target_dir/nimo"
-            sudo chmod +x "$target_dir/nimo"
-        fi
+        log_info "Elevated permissions required for $target_dir. Using sudo..."
+        sudo cp -f ./nimo "$target_dir/nimo"
+        sudo chmod +x "$target_dir/nimo"
     fi
 
-    log_success "Nimo is installed! You can now run '${CLR_BOLD}nimo${CLR_RESET}' from anywhere."
+    log_success "Nimo is installed to ${target_dir}/nimo! You can now run '${CLR_BOLD}nimo${CLR_RESET}' from anywhere."
 }
 
 clean_project() {
@@ -172,7 +180,7 @@ case "${1:-build}" in
     install)
         check_dependencies
         build_project
-        install_binary "${2:-$DEFAULT_INSTALL_DIR}"
+        install_binary "${2:-}"
         ;;
     clean)
         clean_project
