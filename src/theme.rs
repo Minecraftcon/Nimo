@@ -11,6 +11,7 @@ impl Palette {
     pub const MANTLE: Color = Color::Rgb { r: 24, g: 24, b: 37 };     // #181825 - Footer / Title background
     pub const CRUST: Color = Color::Rgb { r: 17, g: 17, b: 27 };      // #11111b - Darker accents & key text
     pub const SURFACE0: Color = Color::Rgb { r: 49, g: 50, b: 68 };   // #313244 - Status bar & active gutter
+    pub const SURFACE1: Color = Color::Rgb { r: 69, g: 71, b: 90 };   // #45475a - Modal borders & dividers
     pub const GUTTER_BG: Color = Color::Rgb { r: 36, g: 37, b: 53 };  // #242535 - Normal gutter background
     pub const ACTIVE_LINE_BG: Color = Color::Rgb { r: 42, g: 44, b: 62 }; // #2a2c3e - Faint editing glow for cursor line
 

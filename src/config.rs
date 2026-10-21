@@ -84,6 +84,11 @@ pub struct Config {
     pub auto_completions: bool,
     pub warp_line: bool,
     pub warp_arrow: String,
+    pub ai_mod: bool,
+    pub ai_api_key: String,
+    pub ai_model: String,
+    pub ai_provider: String,
+    pub ai_endpoint: String,
 }
 
 impl Default for Config {
@@ -105,6 +110,11 @@ impl Default for Config {
             auto_completions: true,
             warp_line: false,
             warp_arrow: "↳ ".to_string(),
+            ai_mod: true,
+            ai_api_key: String::new(),
+            ai_model: "gemini-2.5-flash".to_string(),
+            ai_provider: String::new(),
+            ai_endpoint: String::new(),
         }
     }
 }
@@ -252,6 +262,9 @@ impl Config {
                     }
                 }
             }
+            "aimod" | "ai_mod" | "ai" => {
+                self.ai_mod = if val.is_empty() { true } else { parse_bool(val, true) };
+            }
             _ => {}
         }
     }
@@ -278,6 +291,9 @@ impl Config {
             }
             "softwrap" | "wrap" | "nowrap" | "warpline" | "warp_line" | "wrapline" | "wrap_line" | "wraplines" => {
                 self.warp_line = false;
+            }
+            "aimod" | "ai_mod" | "ai" => {
+                self.ai_mod = false;
             }
             _ => {}
         }
@@ -314,6 +330,21 @@ impl Config {
                         self.warp_arrow = unquoted;
                     }
                 }
+            }
+            "aimod" | "ai_mod" | "ai" => {
+                self.ai_mod = parse_bool(val, self.ai_mod);
+            }
+            "apikey" | "api_key" | "ai_api_key" | "gemini_api_key" | "openai_api_key" => {
+                self.ai_api_key = unquote_str(val);
+            }
+            "aimodel" | "ai_model" | "model" => {
+                self.ai_model = unquote_str(val);
+            }
+            "aiprovider" | "ai_provider" | "provider" => {
+                self.ai_provider = unquote_str(val);
+            }
+            "aiendpoint" | "ai_endpoint" | "endpoint" => {
+                self.ai_endpoint = unquote_str(val);
             }
             "highlight" | "linehighlight" | "spotlight" => {
                 self.highlight_enabled = parse_bool(val, self.highlight_enabled);

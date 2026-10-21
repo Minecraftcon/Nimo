@@ -1,7 +1,8 @@
-mod config;
-mod editor;
-mod syntax;
-mod theme;
+pub mod ai;
+pub mod config;
+pub mod editor;
+pub mod syntax;
+pub mod theme;
 
 use std::env;
 use std::io::{self, stdout};

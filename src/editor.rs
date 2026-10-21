@@ -12,6 +12,7 @@ use crossterm::{
 };
 
 use crate::config::{CompactFooterMode, Config};
+use crate::ai::{self, DiffItem};
 use crate::syntax::{highlight_line, Language};
 use crate::theme::Palette;
 
@@ -22,6 +23,22 @@ pub enum PromptState {
     ExitConfirm,
     Search { query: String, origin: (usize, usize) },
     Help { scroll: usize },
+    AiPrompt { range: (usize, usize), input: String },
+    AiDiffReview {
+        range: (usize, usize),
+        diff: Vec<DiffItem>,
+        new_lines: Vec<String>,
+        original_lines: Vec<String>,
+        selected_idx: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewDisplayLine {
+    pub text: String,
+    pub original_line_num: Option<usize>,
+    pub is_removed: bool,
+    pub is_added: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +82,14 @@ pub fn get_help_lines() -> Vec<HelpLine> {
         HelpLine::Entry("^B", "Toggle Blinking Cursor (blinking vs steady block)"),
         HelpLine::Entry("C-S-A / M-A", "Toggle Auto-Completions & Auto-Pairing (code files)"),
         HelpLine::Entry("^H (or F1)", "Show this Help Screen (Esc to exit)"),
+        HelpLine::Blank,
+
+        HelpLine::Section("AI ASSISTANT (GEMINI & OPENAI)"),
+        HelpLine::Entry("^F", "Mark line 1 & 2 to select range to modify with AI"),
+        HelpLine::Entry("Prompt Box", "Type prompt and press Enter to generate changes"),
+        HelpLine::Entry("^A (or a)", "Accept AI diff modifications into buffer"),
+        HelpLine::Entry("^D (or d)", "Decline AI diff modifications"),
+        HelpLine::Entry("Up / Down", "Navigate through diff lines in review mode"),
         HelpLine::Blank,
 
         HelpLine::Section("CURSOR & NAVIGATION"),
@@ -119,6 +144,7 @@ pub struct Editor {
     pub term_height: u16,
     pub prompt_state: PromptState,
     pub last_search: Option<String>,
+    pub ai_marker: Option<usize>,
 }
 
 /// Find all non-overlapping matches of `query` in `line`, case-insensitively.
@@ -267,6 +293,7 @@ impl Editor {
             term_height,
             prompt_state: PromptState::None,
             last_search: None,
+            ai_marker: None,
         }
     }
 
@@ -509,8 +536,178 @@ impl Editor {
         }
     }
 
+    pub fn get_review_display_lines(&self) -> Option<Vec<ReviewDisplayLine>> {
+        if let PromptState::AiDiffReview { range, ref diff, .. } = self.prompt_state {
+            let (start_line, end_line) = range;
+            let mut list = Vec::new();
+
+            for i in 0..start_line.min(self.lines.len()) {
+                list.push(ReviewDisplayLine {
+                    text: self.lines[i].clone(),
+                    original_line_num: Some(i + 1),
+                    is_removed: false,
+                    is_added: false,
+                });
+            }
+
+            let mut orig_line = start_line + 1;
+            for item in diff {
+                match item {
+                    DiffItem::Unchanged(line) => {
+                        list.push(ReviewDisplayLine {
+                            text: line.clone(),
+                            original_line_num: Some(orig_line),
+                            is_removed: false,
+                            is_added: false,
+                        });
+                        orig_line += 1;
+                    }
+                    DiffItem::Removed(line) => {
+                        list.push(ReviewDisplayLine {
+                            text: line.clone(),
+                            original_line_num: Some(orig_line),
+                            is_removed: true,
+                            is_added: false,
+                        });
+                        orig_line += 1;
+                    }
+                    DiffItem::Added(line) => {
+                        list.push(ReviewDisplayLine {
+                            text: line.clone(),
+                            original_line_num: None,
+                            is_removed: false,
+                            is_added: true,
+                        });
+                    }
+                }
+            }
+
+            for i in (end_line + 1)..self.lines.len() {
+                list.push(ReviewDisplayLine {
+                    text: self.lines[i].clone(),
+                    original_line_num: Some(i + 1),
+                    is_removed: false,
+                    is_added: false,
+                });
+            }
+
+            Some(list)
+        } else {
+            None
+        }
+    }
+
+    pub fn render_ai_prompt_box(
+        &self,
+        stdout: &mut io::Stdout,
+        range: (usize, usize),
+        input: &str,
+    ) -> io::Result<()> {
+        let (start, end) = range;
+        let box_w = 60.min((self.term_width as usize).saturating_sub(4)).max(32);
+        let box_h = 5;
+        let box_x = (self.term_width as usize).saturating_sub(box_w) / 2;
+        let box_y = (self.term_height as usize).saturating_sub(box_h) / 2;
+
+        let title = format!(" Ask Assistant (Lines {}-{}) ", start + 1, end + 1);
+        let title_len = title.chars().count();
+        let border_len = box_w.saturating_sub(title_len + 2);
+        let left_dash = "─";
+        let right_dash = "─".repeat(border_len.saturating_sub(1));
+
+        // Top border
+        queue!(
+            stdout,
+            cursor::MoveTo(box_x as u16, box_y as u16),
+            SetBackgroundColor(Palette::SURFACE0),
+            SetForegroundColor(Palette::MAUVE)
+        )?;
+        write!(stdout, "╭{}", left_dash)?;
+        queue!(stdout, SetForegroundColor(Palette::PEACH))?;
+        write!(stdout, "{}", title)?;
+        queue!(stdout, SetForegroundColor(Palette::MAUVE))?;
+        write!(stdout, "{}╮", right_dash)?;
+
+        // Content row (Input prompt)
+        queue!(
+            stdout,
+            cursor::MoveTo(box_x as u16, (box_y + 1) as u16),
+            SetBackgroundColor(Palette::SURFACE0),
+            SetForegroundColor(Palette::MAUVE)
+        )?;
+        write!(stdout, "│ ")?;
+
+        let avail_input_w = box_w.saturating_sub(4);
+        if input.is_empty() {
+            queue!(stdout, SetForegroundColor(Palette::OVERLAY0))?;
+            let placeholder = "Ask assistant...";
+            let p_len = placeholder.chars().count().min(avail_input_w);
+            write!(stdout, "{}", &placeholder[..p_len])?;
+            write!(stdout, "{}", " ".repeat(avail_input_w.saturating_sub(p_len)))?;
+        } else {
+            queue!(stdout, SetForegroundColor(Palette::TEXT))?;
+            let display_input: String = input.chars().collect();
+            let in_len = display_input.chars().count();
+            if in_len > avail_input_w {
+                let skip = in_len - avail_input_w;
+                let visible: String = display_input.chars().skip(skip).collect();
+                write!(stdout, "{}", visible)?;
+            } else {
+                write!(stdout, "{}{}", display_input, " ".repeat(avail_input_w - in_len))?;
+            }
+        }
+
+        queue!(stdout, SetForegroundColor(Palette::MAUVE))?;
+        write!(stdout, " │")?;
+
+        // Divider row
+        queue!(
+            stdout,
+            cursor::MoveTo(box_x as u16, (box_y + 2) as u16),
+            SetBackgroundColor(Palette::SURFACE0),
+            SetForegroundColor(Palette::SURFACE1)
+        )?;
+        write!(stdout, "├{}┤", "─".repeat(box_w.saturating_sub(2)))?;
+
+        // Hint row
+        queue!(
+            stdout,
+            cursor::MoveTo(box_x as u16, (box_y + 3) as u16),
+            SetBackgroundColor(Palette::SURFACE0),
+            SetForegroundColor(Palette::MAUVE)
+        )?;
+        write!(stdout, "│ ")?;
+        queue!(stdout, SetForegroundColor(Palette::SUBTEXT0))?;
+        let hint = "Enter: Submit  •  Esc: Cancel";
+        let h_len = hint.chars().count().min(avail_input_w);
+        write!(stdout, "{}{}", &hint[..h_len], " ".repeat(avail_input_w.saturating_sub(h_len)))?;
+        queue!(stdout, SetForegroundColor(Palette::MAUVE))?;
+        write!(stdout, " │")?;
+
+        // Bottom border
+        queue!(
+            stdout,
+            cursor::MoveTo(box_x as u16, (box_y + 4) as u16),
+            SetBackgroundColor(Palette::SURFACE0),
+            SetForegroundColor(Palette::MAUVE)
+        )?;
+        write!(stdout, "╰{}╯", "─".repeat(box_w.saturating_sub(2)))?;
+
+        Ok(())
+    }
+
     pub fn update_viewport(&mut self) {
         let text_h = self.text_area_height();
+
+        if let PromptState::AiDiffReview { selected_idx, .. } = self.prompt_state {
+            if selected_idx < self.row_offset {
+                self.row_offset = selected_idx;
+            }
+            if selected_idx >= self.row_offset + text_h {
+                self.row_offset = selected_idx.saturating_sub(text_h) + 1;
+            }
+            return;
+        }
 
         if self.config.warp_line {
             self.col_offset = 0;
@@ -627,6 +824,23 @@ impl Editor {
                     )?;
                     write!(stdout, "{}", esc_hint)?;
                 }
+            } else if matches!(self.prompt_state, PromptState::AiDiffReview { .. }) {
+                queue!(
+                    stdout,
+                    cursor::MoveTo(0, current_terminal_row),
+                    SetBackgroundColor(Palette::MAUVE),
+                    SetForegroundColor(Palette::CRUST)
+                )?;
+                write!(stdout, "{}", " ".repeat(width))?;
+
+                let title = "  NIMO • AI DIFF REVIEW  [^A Accept  •  ^D Decline]";
+                queue!(
+                    stdout,
+                    cursor::MoveTo(0, current_terminal_row),
+                    SetBackgroundColor(Palette::MAUVE),
+                    SetForegroundColor(Palette::CRUST)
+                )?;
+                write!(stdout, "{}", title)?;
             } else {
                 queue!(
                     stdout,
@@ -791,6 +1005,129 @@ impl Editor {
                     write!(stdout, "{}", " ".repeat(self.term_width as usize))?;
                 }
             }
+        } else if let Some(ref rev_lines) = self.get_review_display_lines() {
+            let selected_idx = match self.prompt_state {
+                PromptState::AiDiffReview { selected_idx, .. } => selected_idx,
+                _ => 0,
+            };
+
+            for i in 0..text_h {
+                let rev_idx = self.row_offset + i;
+                let screen_y = current_terminal_row + i as u16;
+                queue!(stdout, cursor::MoveTo(0, screen_y))?;
+
+                if rev_idx < rev_lines.len() {
+                    let rev_line = &rev_lines[rev_idx];
+                    let is_selected = rev_idx == selected_idx;
+
+                    let (gutter_bg, num_fg, line_bg, sign) = if rev_line.is_removed {
+                        (
+                            crossterm::style::Color::Rgb { r: 50, g: 25, b: 32 },
+                            Palette::RED,
+                            crossterm::style::Color::Rgb { r: 60, g: 28, b: 36 },
+                            '-',
+                        )
+                    } else if rev_line.is_added {
+                        (
+                            crossterm::style::Color::Rgb { r: 20, g: 45, b: 30 },
+                            Palette::GREEN,
+                            crossterm::style::Color::Rgb { r: 25, g: 55, b: 36 },
+                            '+',
+                        )
+                    } else {
+                        let g_bg = if is_selected {
+                            self.config.active_line_bg(Palette::GUTTER_BG)
+                        } else {
+                            Palette::GUTTER_BG
+                        };
+                        let l_bg = if is_selected {
+                            self.config.active_line_bg(Palette::BASE)
+                        } else {
+                            Palette::BASE
+                        };
+                        let n_fg = if is_selected {
+                            Palette::MAUVE
+                        } else {
+                            Palette::GUTTER_FG
+                        };
+                        (g_bg, n_fg, l_bg, ' ')
+                    };
+
+                    if gutter_w > 0 {
+                        queue!(stdout, SetBackgroundColor(gutter_bg), SetForegroundColor(num_fg))?;
+                        if self.config.line_numbers {
+                            if rev_line.is_added {
+                                write!(stdout, "   +")?;
+                            } else if let Some(orig_num) = rev_line.original_line_num {
+                                write!(stdout, "{:>3}{}", orig_num % 1000, sign)?;
+                            } else {
+                                write!(stdout, "    ")?;
+                            }
+                        }
+                        if self.config.separator {
+                            let sep_fg = if rev_line.is_removed {
+                                Palette::RED
+                            } else if rev_line.is_added {
+                                Palette::GREEN
+                            } else {
+                                Palette::GUTTER_FG
+                            };
+                            queue!(stdout, SetForegroundColor(sep_fg))?;
+                            write!(stdout, "{}", self.config.separator_style.as_str())?;
+                        }
+                    }
+
+                    queue!(
+                        stdout,
+                        SetBackgroundColor(line_bg),
+                        SetForegroundColor(Palette::TEXT)
+                    )?;
+
+                    let spans = highlight_line(&rev_line.text, self.lang);
+                    let mut current_col: usize = 0;
+                    let mut rendered_w: usize = 0;
+
+                    for span in spans {
+                        let span_len = span.text.chars().count();
+                        let span_end = current_col + span_len;
+
+                        if span_end > self.col_offset && current_col < self.col_offset + available_w {
+                            let slice_start = self.col_offset.saturating_sub(current_col);
+                            let chars: Vec<char> = span.text.chars().collect();
+                            let max_take = (self.col_offset + available_w).saturating_sub(current_col + slice_start);
+                            let visible_slice: String = chars
+                                .into_iter()
+                                .skip(slice_start)
+                                .take(max_take)
+                                .collect();
+
+                            let slice_w = visible_slice.chars().count();
+                            if slice_w > 0 {
+                                queue!(stdout, SetForegroundColor(span.color))?;
+                                write!(stdout, "{}", visible_slice)?;
+                                rendered_w += slice_w;
+                            }
+                        }
+
+                        current_col = span_end;
+                        if current_col >= self.col_offset + available_w {
+                            break;
+                        }
+                    }
+
+                    if rendered_w < available_w {
+                        queue!(stdout, SetBackgroundColor(line_bg), SetForegroundColor(Palette::TEXT))?;
+                        write!(stdout, "{}", " ".repeat(available_w - rendered_w))?;
+                    }
+                } else {
+                    if gutter_w > 0 {
+                        queue!(stdout, SetBackgroundColor(Palette::GUTTER_BG))?;
+                        write!(stdout, "{}", " ".repeat(gutter_w))?;
+                    }
+                    queue!(stdout, SetBackgroundColor(Palette::BASE), SetForegroundColor(Palette::TEXT))?;
+                    write!(stdout, "{}", " ".repeat(available_w))?;
+                }
+            }
         } else if self.config.warp_line {
             for i in 0..text_h {
                 let screen_y = current_terminal_row + i as u16;
@@ -867,7 +1204,11 @@ impl Editor {
                                     };
 
                                     if show_num {
-                                        let num_str = format!("{:>3} ", (row_idx + 1) % 1000);
+                                        let sign = if self.ai_marker == Some(row_idx) { '*' } else { ' ' };
+                                        let num_str = format!("{:>3}{}", (row_idx + 1) % 1000, sign);
+                                        if self.ai_marker == Some(row_idx) {
+                                            queue!(stdout, SetForegroundColor(Palette::PEACH))?;
+                                        }
                                         write!(stdout, "{}", num_str)?;
                                     } else {
                                         write!(stdout, "    ")?;
@@ -1053,7 +1394,11 @@ impl Editor {
                             };
 
                             if show_num {
-                                let num_str = format!("{:>3} ", (row_idx + 1) % 1000);
+                                let sign = if self.ai_marker == Some(row_idx) { '*' } else { ' ' };
+                                let num_str = format!("{:>3}{}", (row_idx + 1) % 1000, sign);
+                                if self.ai_marker == Some(row_idx) {
+                                    queue!(stdout, SetForegroundColor(Palette::PEACH))?;
+                                }
                                 write!(stdout, "{}", num_str)?;
                             } else {
                                 write!(stdout, "    ")?;
@@ -1257,6 +1602,12 @@ impl Editor {
                 PromptState::Help { .. } => {
                     " [ Help & Shortcuts ]  Scroll: Up/Down/PgUp/PgDn  •  Press Esc to Exit".to_string()
                 }
+                PromptState::AiPrompt { range, .. } => {
+                    format!(" Ask Assistant (Lines {}-{}): Type instruction and press Enter", range.0 + 1, range.1 + 1)
+                }
+                PromptState::AiDiffReview { range, .. } => {
+                    format!(" AI Changes (Lines {}-{}): [^A Accept]  [^D Decline]  [Up/Down Navigate]", range.0 + 1, range.1 + 1)
+                }
                 PromptState::None => {
                     if let Some(time) = self.status_time {
                         if time.elapsed() < Duration::from_secs(4) {
@@ -1314,12 +1665,28 @@ impl Editor {
                         ("PgDn", "PgDn"),
                         ("^C", "Cancel"),
                     ],
+                    PromptState::AiPrompt { .. } => [
+                        ("Enter", "Submit"),
+                        ("Esc", "Cancel"),
+                        ("^C", "Cancel"),
+                        ("", ""),
+                        ("", ""),
+                        ("", ""),
+                    ],
+                    PromptState::AiDiffReview { .. } => [
+                        ("^A", "Accept"),
+                        ("^D", "Decline"),
+                        ("Up", "Prev"),
+                        ("Down", "Next"),
+                        ("Esc", "Decline"),
+                        ("^C", "Cancel"),
+                    ],
                     PromptState::None => [
                         ("^O", "Save"),
                         ("^X", "Exit"),
                         ("^W", "WhereIs"),
+                        ("^F", "AI"),
                         ("^H", "Help"),
-                        ("M-W", "Next"),
                         ("M-L", "Wrap"),
                     ],
                 };
@@ -1358,13 +1725,29 @@ impl Editor {
                         ("PgDn", "PgDn"),
                         ("^C", "Cancel"),
                     ],
+                    PromptState::AiPrompt { .. } => [
+                        ("Enter", "Submit"),
+                        ("Esc", "Cancel"),
+                        ("^C", "Cancel"),
+                        ("", ""),
+                        ("", ""),
+                        ("", ""),
+                    ],
+                    PromptState::AiDiffReview { .. } => [
+                        ("^A", "Accept"),
+                        ("^D", "Decline"),
+                        ("Up", "Prev"),
+                        ("Down", "Next"),
+                        ("Esc", "Decline"),
+                        ("^C", "Cancel"),
+                    ],
                     PromptState::None => [
                         ("^O", "Save"),
                         ("^X", "Exit"),
                         ("^W", "WhereIs"),
+                        ("^F", "AI"),
                         ("^K", "Cut"),
                         ("^U", "Paste"),
-                        ("M-W", "Next"),
                     ],
                 };
 
@@ -1385,13 +1768,21 @@ impl Editor {
                         ("", ""),
                         ("", ""),
                     ],
+                    PromptState::AiDiffReview { .. } => [
+                        ("a", "Accept"),
+                        ("d", "Decline"),
+                        ("PgUp", "PgUp"),
+                        ("PgDn", "PgDn"),
+                        ("", ""),
+                        ("", ""),
+                    ],
                     PromptState::None => [
+                        ("M-W", "Next"),
                         ("M-Q", "Prev"),
                         ("^H", "Help"),
                         ("^N", "Num"),
                         ("^S", "Sep"),
                         ("M-L", "Wrap"),
-                        ("^B", "Blink"),
                     ],
                     _ => [
                         ("", ""),
@@ -1408,9 +1799,34 @@ impl Editor {
             }
         }
 
-        // 5. Place cursor at exact position
+        // 5. Render AI Prompt Modal Box if active
+        if let PromptState::AiPrompt { range, ref input } = self.prompt_state {
+            self.render_ai_prompt_box(stdout, range, input)?;
+        }
+
+        // 6. Place cursor at exact position
         let (screen_cursor_x, screen_cursor_y) = match &self.prompt_state {
             PromptState::Help { .. } => (0, 0),
+            PromptState::AiPrompt { input, .. } => {
+                let box_w = 60.min((self.term_width as usize).saturating_sub(4)).max(32);
+                let box_h = 5;
+                let box_x = (self.term_width as usize).saturating_sub(box_w) / 2;
+                let box_y = (self.term_height as usize).saturating_sub(box_h) / 2;
+                let avail_input_w = box_w.saturating_sub(4);
+                let in_len = input.chars().count();
+                let col_in_box = in_len.min(avail_input_w);
+                let cursor_x = (box_x + 2 + col_in_box) as u16;
+                let cursor_y = (box_y + 1) as u16;
+                (cursor_x, cursor_y)
+            }
+            PromptState::AiDiffReview { selected_idx, .. } => {
+                let y = if self.config.top_bar {
+                    1 + selected_idx.saturating_sub(self.row_offset) as u16
+                } else {
+                    selected_idx.saturating_sub(self.row_offset) as u16
+                };
+                (gutter_w as u16, y)
+            }
             PromptState::SaveConfirm { input, .. } => {
                 let prompt_prefix = " File Name to Write: ";
                 let cursor_x = (prompt_prefix.chars().count() + input.chars().count())
@@ -1595,8 +2011,184 @@ impl Editor {
         Ok(())
     }
 
+    pub fn handle_ai_prompt(&mut self, key: crossterm::event::KeyEvent) -> io::Result<()> {
+        let (range, mut input) = match &self.prompt_state {
+            PromptState::AiPrompt { range, input } => (*range, input.clone()),
+            _ => return Ok(()),
+        };
+
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C'))
+        {
+            self.prompt_state = PromptState::None;
+            self.set_status("[AI prompt cancelled]");
+            return Ok(());
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.prompt_state = PromptState::None;
+                self.set_status("[AI prompt cancelled]");
+                return Ok(());
+            }
+            KeyCode::Backspace => {
+                input.pop();
+                self.prompt_state = PromptState::AiPrompt { range, input };
+                return Ok(());
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                input.push(c);
+                self.prompt_state = PromptState::AiPrompt { range, input };
+                return Ok(());
+            }
+            KeyCode::Enter => {
+                if input.trim().is_empty() {
+                    self.set_status("Please enter a prompt for the AI assistant");
+                    return Ok(());
+                }
+
+                let prompt_text = input.trim().to_string();
+                let (start, end) = range;
+                let target_lines = self.lines[start..=end.min(self.lines.len().saturating_sub(1))].to_vec();
+                let file_context = self.lines.join("\n");
+                self.set_status("AI assistant thinking...");
+                let mut stdout = io::stdout();
+                let _ = self.render(&mut stdout);
+
+                match ai::call_ai_assistant(&prompt_text, &target_lines, &file_context, &self.config) {
+                    Ok(new_lines) => {
+                        let diff = ai::compute_line_diff(&target_lines, &new_lines);
+                        let first_diff_idx = diff
+                            .iter()
+                            .position(|d| !matches!(d, DiffItem::Unchanged(_)))
+                            .unwrap_or(0);
+                        let sel = start + first_diff_idx;
+                        self.prompt_state = PromptState::AiDiffReview {
+                            range: (start, end),
+                            diff,
+                            new_lines,
+                            original_lines: target_lines,
+                            selected_idx: sel,
+                        };
+                        self.cursor_row = sel;
+                        self.set_status("Review AI changes: [^A Accept]  [^D Decline]  [Up/Down Navigate]");
+                    }
+                    Err(err) => {
+                        self.set_status(format!("AI error: {}", err));
+                        self.prompt_state = PromptState::None;
+                    }
+                }
+                return Ok(());
+            }
+            _ => return Ok(()),
+        }
+    }
+
+    pub fn handle_ai_diff_review(&mut self, key: crossterm::event::KeyEvent) -> io::Result<()> {
+        let (range, new_lines, mut selected_idx) = match &self.prompt_state {
+            PromptState::AiDiffReview { range, new_lines, selected_idx, .. } => {
+                (*range, new_lines.clone(), *selected_idx)
+            }
+            _ => return Ok(()),
+        };
+
+        let total_review_lines = self.get_review_display_lines().map(|l| l.len()).unwrap_or(0);
+
+        // Accept modifications: Ctrl+A, 'a', 'A', or Enter
+        let is_accept = (key.modifiers.contains(KeyModifiers::CONTROL)
+            && (key.code == KeyCode::Char('a') || key.code == KeyCode::Char('A')))
+            || (!key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && (key.code == KeyCode::Char('a') || key.code == KeyCode::Char('A')))
+            || key.code == KeyCode::Enter;
+
+        if is_accept {
+            let (start, end) = range;
+            let end_clamped = end.min(self.lines.len().saturating_sub(1));
+            let replacement = new_lines;
+
+            if start <= end_clamped && start < self.lines.len() {
+                self.lines.splice(start..=end_clamped, replacement);
+            } else {
+                self.lines.extend(replacement);
+            }
+
+            if self.lines.is_empty() {
+                self.lines.push(String::new());
+            }
+
+            self.cursor_row = start.min(self.lines.len().saturating_sub(1));
+            self.cursor_col = 0;
+            self.update_modified_status();
+            self.prompt_state = PromptState::None;
+            self.set_status("AI modifications accepted");
+            return Ok(());
+        }
+
+        // Decline modifications: Ctrl+D, Ctrl+C, 'd', 'D', or Esc
+        let is_decline = (key.modifiers.contains(KeyModifiers::CONTROL)
+            && (key.code == KeyCode::Char('d')
+                || key.code == KeyCode::Char('D')
+                || key.code == KeyCode::Char('c')
+                || key.code == KeyCode::Char('C')))
+            || (!key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && (key.code == KeyCode::Char('d') || key.code == KeyCode::Char('D')))
+            || key.code == KeyCode::Esc;
+
+        if is_decline {
+            self.prompt_state = PromptState::None;
+            self.set_status("AI modifications declined");
+            return Ok(());
+        }
+
+        let page_size = self.text_area_height();
+
+        // Navigation through diff lines
+        match key.code {
+            KeyCode::Up => {
+                selected_idx = selected_idx.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if selected_idx + 1 < total_review_lines {
+                    selected_idx += 1;
+                }
+            }
+            KeyCode::PageUp => {
+                selected_idx = selected_idx.saturating_sub(page_size);
+            }
+            KeyCode::PageDown => {
+                selected_idx = (selected_idx + page_size).min(total_review_lines.saturating_sub(1));
+            }
+            KeyCode::Home => {
+                selected_idx = 0;
+            }
+            KeyCode::End => {
+                selected_idx = total_review_lines.saturating_sub(1);
+            }
+            _ => return Ok(()),
+        }
+
+        self.cursor_row = selected_idx;
+        if let PromptState::AiDiffReview { selected_idx: ref mut sel, .. } = self.prompt_state {
+            *sel = selected_idx;
+        }
+
+        Ok(())
+    }
+
     pub fn handle_event(&mut self, event: Event) -> io::Result<()> {
         if let Event::Key(key) = event {
+            if matches!(self.prompt_state, PromptState::AiDiffReview { .. }) {
+                return self.handle_ai_diff_review(key);
+            }
+            if matches!(self.prompt_state, PromptState::AiPrompt { .. }) {
+                return self.handle_ai_prompt(key);
+            }
+
             // Handle prompt states first if active
             match &mut self.prompt_state {
                 PromptState::SaveConfirm { input, quit_after } => {
@@ -1938,7 +2530,7 @@ impl Editor {
                         _ => return Ok(()),
                     }
                 }
-                PromptState::None => {}
+                PromptState::None | PromptState::AiPrompt { .. } | PromptState::AiDiffReview { .. } => {}
             }
 
             // Hotkeys with Ctrl
@@ -1981,7 +2573,32 @@ impl Editor {
                         };
                         return Ok(());
                     }
+                    KeyCode::Char('f') | KeyCode::Char('F') => {
+                        if !self.config.ai_mod {
+                            self.set_status("AI Assistant is disabled (set AiMod = true in .nimorc)");
+                            return Ok(());
+                        }
+
+                        if let Some(m1) = self.ai_marker.take() {
+                            let m2 = self.cursor_row;
+                            let start = m1.min(m2);
+                            let end = m1.max(m2);
+                            self.prompt_state = PromptState::AiPrompt {
+                                range: (start, end),
+                                input: String::new(),
+                            };
+                            self.set_status(format!("Selected lines {}-{} for AI assistant", start + 1, end + 1));
+                        } else {
+                            self.ai_marker = Some(self.cursor_row);
+                            self.set_status(format!("Marker 1 set at line {}. Move cursor and press ^F to set Marker 2", self.cursor_row + 1));
+                        }
+                        return Ok(());
+                    }
                     KeyCode::Char('c') | KeyCode::Char('C') => {
+                        if self.ai_marker.take().is_some() {
+                            self.set_status("[AI marker cancelled]");
+                            return Ok(());
+                        }
                         self.set_status(format!(
                             "Cursor: Line {}, Column {}",
                             self.cursor_row + 1,
@@ -2114,7 +2731,9 @@ impl Editor {
                     return Ok(());
                 }
                 KeyCode::Esc => {
-                    if self.last_search.is_some() {
+                    if self.ai_marker.take().is_some() {
+                        self.set_status("[AI marker cancelled]");
+                    } else if self.last_search.is_some() {
                         self.last_search = None;
                         self.set_status("[Search highlights cleared]");
                     }
@@ -3160,6 +3779,150 @@ mod tests {
             )))
             .unwrap();
         assert_eq!(editor.prompt_state, PromptState::None);
+    }
+
+    #[test]
+    fn test_ai_markers_selection_and_cancel() {
+        let mut editor = Editor::new(None, Config::default());
+        editor.lines = vec![
+            "fn first() {}".to_string(),
+            "fn second() {}".to_string(),
+            "fn third() {}".to_string(),
+        ];
+        editor.cursor_row = 0;
+
+        // 1. Mark line 0 with Ctrl+F
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL,
+            )))
+            .unwrap();
+        assert_eq!(editor.ai_marker, Some(0));
+
+        // Cancel with Esc
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+        assert_eq!(editor.ai_marker, None);
+
+        // Mark line 0 again
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL,
+            )))
+            .unwrap();
+        assert_eq!(editor.ai_marker, Some(0));
+
+        // Move cursor to line 2 and mark with Ctrl+F
+        editor.cursor_row = 2;
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL,
+            )))
+            .unwrap();
+
+        assert_eq!(editor.ai_marker, None);
+        assert_eq!(
+            editor.prompt_state,
+            PromptState::AiPrompt {
+                range: (0, 2),
+                input: String::new(),
+            }
+        );
+
+        // Cancel prompt with Esc
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+        assert_eq!(editor.prompt_state, PromptState::None);
+    }
+
+    #[test]
+    fn test_ai_diff_review_accept_and_decline() {
+        let mut editor = Editor::new(None, Config::default());
+        editor.lines = vec![
+            "line 1".to_string(),
+            "line 2 old".to_string(),
+            "line 3 old".to_string(),
+            "line 4".to_string(),
+        ];
+        editor.saved_lines = editor.lines.clone();
+        editor.is_modified = false;
+
+        let diff = vec![
+            DiffItem::Removed("line 2 old".to_string()),
+            DiffItem::Added("line 2 new".to_string()),
+            DiffItem::Removed("line 3 old".to_string()),
+            DiffItem::Added("line 3 new".to_string()),
+        ];
+        let new_lines = vec!["line 2 new".to_string(), "line 3 new".to_string()];
+        let orig_lines = vec!["line 2 old".to_string(), "line 3 old".to_string()];
+
+        // 1. Enter review state
+        editor.prompt_state = PromptState::AiDiffReview {
+            range: (1, 2),
+            diff: diff.clone(),
+            new_lines: new_lines.clone(),
+            original_lines: orig_lines.clone(),
+            selected_idx: 1,
+        };
+
+        // Navigate with Down
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+        if let PromptState::AiDiffReview { selected_idx, .. } = editor.prompt_state {
+            assert_eq!(selected_idx, 2);
+        } else {
+            panic!("Expected AiDiffReview state");
+        }
+
+        // Decline with Ctrl+D
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+            )))
+            .unwrap();
+        assert_eq!(editor.prompt_state, PromptState::None);
+        assert_eq!(editor.lines[1], "line 2 old");
+        assert_eq!(editor.lines[2], "line 3 old");
+        assert!(!editor.is_modified);
+
+        // 2. Re-enter review state and accept with Ctrl+A
+        editor.prompt_state = PromptState::AiDiffReview {
+            range: (1, 2),
+            diff,
+            new_lines,
+            original_lines: orig_lines,
+            selected_idx: 1,
+        };
+
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+            )))
+            .unwrap();
+        assert_eq!(editor.prompt_state, PromptState::None);
+        assert_eq!(editor.lines.len(), 4);
+        assert_eq!(editor.lines[0], "line 1");
+        assert_eq!(editor.lines[1], "line 2 new");
+        assert_eq!(editor.lines[2], "line 3 new");
+        assert_eq!(editor.lines[3], "line 4");
+        assert!(editor.is_modified);
     }
 }
 

@@ -116,5 +116,33 @@ WarpLine = true
 # nanorc syntax: set softwraparrow "↳ "
 WarpArrow = ↳ 
 
+# ------------------------------------------------------------------------------
+# 9. AI Code Modification Assistant (Gemini & OpenAI-compatible)
+# ------------------------------------------------------------------------------
+# AiMod: Enable or disable the AI Code Assistant.
+# Select range by pressing Ctrl+F on line 1, moving cursor, then Ctrl+F on line 2.
+# A centered modal box appears: type your prompt and press Enter.
+# Review modifications:
+#   - Removed lines show '-' after the line number with brownish-red highlight.
+#   - Added lines show '+' after the line number with dark green highlight.
+#   - Press Ctrl+A (or 'a') to accept modifications into the buffer.
+#   - Press Ctrl+D (or 'd' / Esc) to decline and discard modifications.
+#   - Use Up and Down arrow keys to inspect the diff lines.
+AiMod = true
 
+# ApiKey: API key for Gemini or OpenAI-compatible service.
+# Supports environment variable expansion: $(GEMINI_API_KEY) or $OPENAI_API_KEY
+# If left empty, Nimo automatically checks GEMINI_API_KEY or OPENAI_API_KEY in env.
+ApiKey = $(GEMINI_API_KEY)
 
+# AiModel: LLM model name.
+# Supported Gemini models: gemini-2.5-flash, gemini-3.1-flash-lite, gemini-1.5-pro
+# Supported OpenAI models: gpt-4o-mini, gpt-4o, etc.
+AiModel = gemini-3.1-flash-lite
+
+# AiProvider: 'gemini' or 'openai' (auto-detected if left empty)
+# AiProvider = gemini
+
+# AiEndpoint: Optional custom endpoint URL for local LLMs (Ollama, vLLM, LM Studio)
+# Example for local Ollama: http://localhost:11434/v1/chat/completions
+# AiEndpoint = http://localhost:11434/v1/chat/completions
