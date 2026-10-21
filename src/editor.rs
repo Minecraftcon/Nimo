@@ -241,14 +241,14 @@ impl Editor {
         for i in 0..text_h {
             let row_idx = self.row_offset + i;
             let screen_y = current_terminal_row + i as u16;
+            let is_active_row = row_idx == self.cursor_row;
 
             queue!(stdout, cursor::MoveTo(0, screen_y))?;
 
             // Gutter rendering
             if gutter_w > 0 {
-                let is_active_row = row_idx == self.cursor_row;
                 let gutter_bg = if is_active_row {
-                    Palette::SURFACE0
+                    Palette::ACTIVE_LINE_BG
                 } else {
                     Palette::GUTTER_BG
                 };
@@ -316,9 +316,15 @@ impl Editor {
             }
 
             // Line Text rendering
+            let line_bg = if is_active_row {
+                Palette::ACTIVE_LINE_BG
+            } else {
+                Palette::BASE
+            };
+
             queue!(
                 stdout,
-                SetBackgroundColor(Palette::BASE),
+                SetBackgroundColor(line_bg),
                 SetForegroundColor(Palette::TEXT)
             )?;
 

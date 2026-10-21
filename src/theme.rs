@@ -12,6 +12,7 @@ impl Palette {
     pub const CRUST: Color = Color::Rgb { r: 17, g: 17, b: 27 };      // #11111b - Darker accents & key text
     pub const SURFACE0: Color = Color::Rgb { r: 49, g: 50, b: 68 };   // #313244 - Status bar & active gutter
     pub const GUTTER_BG: Color = Color::Rgb { r: 36, g: 37, b: 53 };  // #242535 - Normal gutter background
+    pub const ACTIVE_LINE_BG: Color = Color::Rgb { r: 42, g: 44, b: 62 }; // #2a2c3e - Faint editing glow for cursor line
 
     // Foregrounds & Accents
     pub const TEXT: Color = Color::Rgb { r: 205, g: 214, b: 244 };    // #cdd6f4 - Main text
