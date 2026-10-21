@@ -62,3 +62,19 @@ StatusBar = true
 
 # Footer: Show or hide the bottom two Nano shortcut helper rows (^O, ^X, ^K, etc.).
 Footer = true
+
+# ------------------------------------------------------------------------------
+# 5. Active Cursor Line Highlight & Glow (nanorc & nimorc compatible)
+# ------------------------------------------------------------------------------
+# Highlight: Enable/disable faint editing glow on cursor row (nanorc: set/unset spotlight)
+Highlight = true
+
+# HighlightColor: Color of the active line glow (nanorc: set stripecolor <color>)
+# Supports Catppuccin names (mauve, blue, peach, green, yellow, teal, red, lavender,
+# sapphire, surface) or hex (#cba6f7) or rgb(r, g, b).
+HighlightColor = mauve
+
+# HighlightOpacity: Opacity of the faint glow blended over background
+# Supports float (0.0 to 1.0) or percentage (e.g. 10%, 15%, 25%)
+HighlightOpacity = 0.08
+

@@ -248,7 +248,7 @@ impl Editor {
             // Gutter rendering
             if gutter_w > 0 {
                 let gutter_bg = if is_active_row {
-                    Palette::ACTIVE_LINE_BG
+                    self.config.active_line_bg(Palette::GUTTER_BG)
                 } else {
                     Palette::GUTTER_BG
                 };
@@ -317,7 +317,7 @@ impl Editor {
 
             // Line Text rendering
             let line_bg = if is_active_row {
-                Palette::ACTIVE_LINE_BG
+                self.config.active_line_bg(Palette::BASE)
             } else {
                 Palette::BASE
             };
