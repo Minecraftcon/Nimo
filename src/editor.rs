@@ -21,6 +21,70 @@ pub enum PromptState {
     SaveConfirm { input: String, quit_after: bool },
     ExitConfirm,
     Search { query: String, origin: (usize, usize) },
+    Help { scroll: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HelpLine {
+    Title(&'static str),
+    Section(&'static str),
+    Entry(&'static str, &'static str),
+    Note(&'static str),
+    Blank,
+}
+
+pub fn get_help_lines() -> Vec<HelpLine> {
+    vec![
+        HelpLine::Blank,
+        HelpLine::Title("  NIMO EDITOR - COMMANDS & TOGGLES REFERENCE"),
+        HelpLine::Note("  Fast, elegant terminal text editor • Catppuccin Mocha Truecolor"),
+        HelpLine::Blank,
+
+        HelpLine::Section("FILE & BUFFER OPERATIONS"),
+        HelpLine::Entry("^O (or F2)", "Save / WriteOut buffer to file"),
+        HelpLine::Entry("^X", "Exit Nimo (prompts to save modified buffer)"),
+        HelpLine::Entry("^K", "Cut current line to clipboard"),
+        HelpLine::Entry("^U", "Paste clipboard line below cursor"),
+        HelpLine::Blank,
+
+        HelpLine::Section("SEARCH & HIGHLIGHTS"),
+        HelpLine::Entry("^W", "WhereIs / Search (with live match highlights)"),
+        HelpLine::Entry("Enter / Down", "Cycle to next search match"),
+        HelpLine::Entry("Up", "Cycle to previous search match"),
+        HelpLine::Entry("M-W (or F3)", "Repeat search forward (Find Next)"),
+        HelpLine::Entry("M-Q (or S-F3)", "Repeat search backward (Find Prev)"),
+        HelpLine::Entry("Esc", "Done / Clear search match highlights"),
+        HelpLine::Entry("^C", "Display current cursor line, column & char count"),
+        HelpLine::Blank,
+
+        HelpLine::Section("INTERFACE TOGGLES"),
+        HelpLine::Entry("M-L (or M-Z)", "Toggle WarpLine / Soft Wrap (wrap long lines with |_>)"),
+        HelpLine::Entry("^N", "Toggle Line Numbers in gutter"),
+        HelpLine::Entry("^S", "Toggle Gutter Separator divider"),
+        HelpLine::Entry("^P", "Cycle Separator Style (pipe, thin, double, dots, slash, none)"),
+        HelpLine::Entry("^B", "Toggle Blinking Cursor (blinking vs steady block)"),
+        HelpLine::Entry("C-S-A / M-A", "Toggle Auto-Completions & Auto-Pairing (code files)"),
+        HelpLine::Entry("^H (or F1)", "Show this Help Screen (Esc to exit)"),
+        HelpLine::Blank,
+
+        HelpLine::Section("CURSOR & NAVIGATION"),
+        HelpLine::Entry("Arrow Keys", "Move cursor (smooth across soft-wrapped line chunks)"),
+        HelpLine::Entry("Home", "Jump to current chunk start, then line start"),
+        HelpLine::Entry("End", "Jump to current chunk end, then line end"),
+        HelpLine::Entry("PgUp / PgDn", "Scroll one screen page up or down"),
+        HelpLine::Blank,
+
+        HelpLine::Section("CONFIGURATION (.nimorc & .nanorc)"),
+        HelpLine::Entry("WarpLine = true", "Enable soft line wrapping (nanorc: set softwrap)"),
+        HelpLine::Entry("CompactFooter = auto", "Adaptive mobile 1-row / desktop 2-row footer (nanorc: set minibar)"),
+        HelpLine::Entry("Highlight = true", "Faint editing glow on cursor line (nanorc: set spotlight)"),
+        HelpLine::Entry("HighlightColor = mauve", "Glow color: mauve, peach, blue, hex (nanorc: set stripecolor)"),
+        HelpLine::Entry("HighlightOpacity = 0.08", "Glow opacity: 0.08, 15% (nanorc: set opacity 15%)"),
+        HelpLine::Entry("AutoCompletions = true", "Auto-pair (), [], {}, \"\", '', `` on code files"),
+        HelpLine::Entry("CustomSeparator = '{line} :'", "Custom gutter format string"),
+        HelpLine::Blank,
+        HelpLine::Note("  [ Press Esc or q to exit help and return to editor ]"),
+    ]
 }
 
 pub const WRAP_ARROW: &str = "|_> ";
@@ -531,53 +595,85 @@ impl Editor {
 
         // 1. Top Bar
         if self.config.top_bar {
-            queue!(
-                stdout,
-                cursor::MoveTo(0, current_terminal_row),
-                SetBackgroundColor(Palette::SURFACE0),
-                SetForegroundColor(Palette::TEXT)
-            )?;
-
-            let filename = self
-                .file_path
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "[New File]".to_string());
-
-            let file_str = format!("File: {}", filename);
-            let mod_str = if self.is_modified { " [Modified]" } else { "" };
-            let full_title = format!("{}{}", file_str, mod_str);
             let width = self.term_width as usize;
 
-            // Render highlighted top bar background (Mauve accent)
-            queue!(
-                stdout,
-                cursor::MoveTo(0, current_terminal_row),
-                SetBackgroundColor(Palette::MAUVE),
-                SetForegroundColor(Palette::CRUST)
-            )?;
-            write!(stdout, "{}", " ".repeat(width))?;
-
-            // Render centered File: <name> [Modified]
-            let center_len = full_title.chars().count();
-            if center_len < width {
-                let start_x = ((width.saturating_sub(center_len)) / 2) as u16;
+            if matches!(self.prompt_state, PromptState::Help { .. }) {
                 queue!(
                     stdout,
-                    cursor::MoveTo(start_x, current_terminal_row),
+                    cursor::MoveTo(0, current_terminal_row),
                     SetBackgroundColor(Palette::MAUVE),
                     SetForegroundColor(Palette::CRUST)
                 )?;
-                write!(stdout, "{}", file_str)?;
+                write!(stdout, "{}", " ".repeat(width))?;
 
-                if self.is_modified {
+                let title = "  NIMO HELP & SHORTCUTS";
+                let esc_hint = "[Esc to Exit]";
+                queue!(
+                    stdout,
+                    cursor::MoveTo(0, current_terminal_row),
+                    SetBackgroundColor(Palette::MAUVE),
+                    SetForegroundColor(Palette::CRUST)
+                )?;
+                write!(stdout, "{}", title)?;
+
+                if width > title.chars().count() + esc_hint.chars().count() + 4 {
+                    let esc_x = (width - esc_hint.chars().count() - 2) as u16;
                     queue!(
                         stdout,
-                        SetBackgroundColor(Palette::RED),
+                        cursor::MoveTo(esc_x, current_terminal_row),
+                        SetBackgroundColor(Palette::PEACH),
                         SetForegroundColor(Palette::CRUST)
                     )?;
-                    write!(stdout, " [Modified]")?;
+                    write!(stdout, "{}", esc_hint)?;
+                }
+            } else {
+                queue!(
+                    stdout,
+                    cursor::MoveTo(0, current_terminal_row),
+                    SetBackgroundColor(Palette::SURFACE0),
+                    SetForegroundColor(Palette::TEXT)
+                )?;
+
+                let filename = self
+                    .file_path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "[New File]".to_string());
+
+                let file_str = format!("File: {}", filename);
+                let mod_str = if self.is_modified { " [Modified]" } else { "" };
+                let full_title = format!("{}{}", file_str, mod_str);
+
+                // Render highlighted top bar background (Mauve accent)
+                queue!(
+                    stdout,
+                    cursor::MoveTo(0, current_terminal_row),
+                    SetBackgroundColor(Palette::MAUVE),
+                    SetForegroundColor(Palette::CRUST)
+                )?;
+                write!(stdout, "{}", " ".repeat(width))?;
+
+                // Render centered File: <name> [Modified]
+                let center_len = full_title.chars().count();
+                if center_len < width {
+                    let start_x = ((width.saturating_sub(center_len)) / 2) as u16;
+                    queue!(
+                        stdout,
+                        cursor::MoveTo(start_x, current_terminal_row),
+                        SetBackgroundColor(Palette::MAUVE),
+                        SetForegroundColor(Palette::CRUST)
+                    )?;
+                    write!(stdout, "{}", file_str)?;
+
+                    if self.is_modified {
+                        queue!(
+                            stdout,
+                            SetBackgroundColor(Palette::RED),
+                            SetForegroundColor(Palette::CRUST)
+                        )?;
+                        write!(stdout, " [Modified]")?;
+                    }
                 }
             }
 
@@ -589,7 +685,7 @@ impl Editor {
         let gutter_w = self.gutter_width();
         let available_w = (self.term_width as usize).saturating_sub(gutter_w);
 
-        let display_rows = if self.config.warp_line {
+        let display_rows = if !matches!(self.prompt_state, PromptState::Help { .. }) && self.config.warp_line {
             let mut rows = Vec::with_capacity(text_h);
             let mut curr_line = self.row_offset;
             let mut curr_chunk = self.wrap_sub_row;
@@ -622,7 +718,79 @@ impl Editor {
             Vec::new()
         };
 
-        if self.config.warp_line {
+        if let PromptState::Help { scroll } = self.prompt_state {
+            let help_items = get_help_lines();
+            for i in 0..text_h {
+                let screen_y = current_terminal_row + i as u16;
+                queue!(
+                    stdout,
+                    cursor::MoveTo(0, screen_y),
+                    SetBackgroundColor(Palette::BASE),
+                    SetForegroundColor(Palette::TEXT)
+                )?;
+
+                let line_idx = scroll + i;
+                if line_idx < help_items.len() {
+                    match &help_items[line_idx] {
+                        HelpLine::Blank => {
+                            write!(stdout, "{}", " ".repeat(self.term_width as usize))?;
+                        }
+                        HelpLine::Title(title) => {
+                            queue!(
+                                stdout,
+                                SetBackgroundColor(Palette::BASE),
+                                SetForegroundColor(Palette::PEACH)
+                            )?;
+                            let pad = (self.term_width as usize).saturating_sub(title.chars().count());
+                            write!(stdout, "{}{}", title, " ".repeat(pad))?;
+                        }
+                        HelpLine::Note(note) => {
+                            queue!(
+                                stdout,
+                                SetBackgroundColor(Palette::BASE),
+                                SetForegroundColor(Palette::SUBTEXT0)
+                            )?;
+                            let pad = (self.term_width as usize).saturating_sub(note.chars().count());
+                            write!(stdout, "{}{}", note, " ".repeat(pad))?;
+                        }
+                        HelpLine::Section(sec) => {
+                            queue!(
+                                stdout,
+                                SetBackgroundColor(Palette::BASE),
+                                SetForegroundColor(Palette::MAUVE)
+                            )?;
+                            let sec_str = format!("  ── {} ──", sec);
+                            let pad = (self.term_width as usize).saturating_sub(sec_str.chars().count());
+                            write!(stdout, "{}{}", sec_str, " ".repeat(pad))?;
+                        }
+                        HelpLine::Entry(key, desc) => {
+                            let key_w = 22.min((self.term_width as usize).saturating_sub(10));
+                            let padded_key = format!("    {:<width$}", key, width = key_w.saturating_sub(4));
+                            queue!(
+                                stdout,
+                                SetBackgroundColor(Palette::BASE),
+                                SetForegroundColor(Palette::PEACH)
+                            )?;
+                            write!(stdout, "{}", padded_key)?;
+
+                            queue!(
+                                stdout,
+                                SetBackgroundColor(Palette::BASE),
+                                SetForegroundColor(Palette::TEXT)
+                            )?;
+                            let written = padded_key.chars().count();
+                            let avail_desc = (self.term_width as usize).saturating_sub(written);
+                            let desc_slice: String = desc.chars().take(avail_desc).collect();
+                            let d_len = desc_slice.chars().count();
+                            let pad = avail_desc.saturating_sub(d_len);
+                            write!(stdout, "{}{}", desc_slice, " ".repeat(pad))?;
+                        }
+                    }
+                } else {
+                    write!(stdout, "{}", " ".repeat(self.term_width as usize))?;
+                }
+            }
+        } else if self.config.warp_line {
             for i in 0..text_h {
                 let screen_y = current_terminal_row + i as u16;
                 queue!(stdout, cursor::MoveTo(0, screen_y))?;
@@ -1080,6 +1248,9 @@ impl Editor {
                         format!(" Search: {}{}", query, count_str)
                     }
                 }
+                PromptState::Help { .. } => {
+                    " [ Help & Shortcuts ]  Scroll: Up/Down/PgUp/PgDn  •  Press Esc to Exit".to_string()
+                }
                 PromptState::None => {
                     if let Some(time) = self.status_time {
                         if time.elapsed() < Duration::from_secs(4) {
@@ -1129,12 +1300,20 @@ impl Editor {
                         ("M-W", "Next"),
                         ("M-Q", "Prev"),
                     ],
+                    PromptState::Help { .. } => [
+                        ("Esc", "Exit"),
+                        ("Up", "Prev"),
+                        ("Down", "Next"),
+                        ("PgUp", "PgUp"),
+                        ("PgDn", "PgDn"),
+                        ("^C", "Cancel"),
+                    ],
                     PromptState::None => [
                         ("^O", "Save"),
                         ("^X", "Exit"),
                         ("^W", "WhereIs"),
+                        ("^H", "Help"),
                         ("M-W", "Next"),
-                        ("M-Q", "Prev"),
                         ("M-L", "Wrap"),
                     ],
                 };
@@ -1165,6 +1344,14 @@ impl Editor {
                         ("^C", "Cancel"),
                         ("", ""),
                     ],
+                    PromptState::Help { .. } => [
+                        ("Esc", "Exit"),
+                        ("Up", "Prev"),
+                        ("Down", "Next"),
+                        ("PgUp", "PgUp"),
+                        ("PgDn", "PgDn"),
+                        ("^C", "Cancel"),
+                    ],
                     PromptState::None => [
                         ("^O", "Save"),
                         ("^X", "Exit"),
@@ -1184,9 +1371,17 @@ impl Editor {
                         ("", ""),
                         ("", ""),
                     ],
+                    PromptState::Help { .. } => [
+                        ("Home", "Top"),
+                        ("End", "Bottom"),
+                        ("q", "Exit"),
+                        ("Enter", "Exit"),
+                        ("", ""),
+                        ("", ""),
+                    ],
                     PromptState::None => [
                         ("M-Q", "Prev"),
-                        ("^C", "Pos"),
+                        ("^H", "Help"),
                         ("^N", "Num"),
                         ("^S", "Sep"),
                         ("M-L", "Wrap"),
@@ -1209,6 +1404,7 @@ impl Editor {
 
         // 5. Place cursor at exact position
         let (screen_cursor_x, screen_cursor_y) = match &self.prompt_state {
+            PromptState::Help { .. } => (0, 0),
             PromptState::SaveConfirm { input, .. } => {
                 let prompt_prefix = " File Name to Write: ";
                 let cursor_x = (prompt_prefix.chars().count() + input.chars().count())
@@ -1266,11 +1462,15 @@ impl Editor {
             }
         };
 
-        queue!(
-            stdout,
-            cursor::MoveTo(screen_cursor_x, screen_cursor_y),
-            cursor::Show
-        )?;
+        if matches!(self.prompt_state, PromptState::Help { .. }) {
+            queue!(stdout, cursor::Hide)?;
+        } else {
+            queue!(
+                stdout,
+                cursor::MoveTo(screen_cursor_x, screen_cursor_y),
+                cursor::Show
+            )?;
+        }
 
         stdout.flush()?;
         Ok(())
@@ -1671,6 +1871,62 @@ impl Editor {
                         _ => return Ok(()),
                     }
                 }
+                PromptState::Help { scroll } => {
+                    let help_lines = get_help_lines();
+                    let total_help_lines = help_lines.len();
+                    let page_size = self.term_height.saturating_sub(4) as usize;
+
+                    if key.code == KeyCode::Esc
+                        || key.code == KeyCode::Enter
+                        || key.code == KeyCode::Char('q')
+                        || key.code == KeyCode::Char('Q')
+                        || (key.modifiers.contains(KeyModifiers::CONTROL)
+                            && (key.code == KeyCode::Char('c')
+                                || key.code == KeyCode::Char('C')
+                                || key.code == KeyCode::Char('x')
+                                || key.code == KeyCode::Char('X')
+                                || key.code == KeyCode::Char('h')
+                                || key.code == KeyCode::Char('H')))
+                        || key.code == KeyCode::F(1)
+                    {
+                        self.prompt_state = PromptState::None;
+                        self.set_status("");
+                        return Ok(());
+                    }
+
+                    match key.code {
+                        KeyCode::Up => {
+                            *scroll = scroll.saturating_sub(1);
+                            return Ok(());
+                        }
+                        KeyCode::Down => {
+                            let max_scroll = total_help_lines.saturating_sub(page_size.min(total_help_lines));
+                            if *scroll < max_scroll {
+                                *scroll += 1;
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::PageUp => {
+                            *scroll = scroll.saturating_sub(page_size);
+                            return Ok(());
+                        }
+                        KeyCode::PageDown => {
+                            let max_scroll = total_help_lines.saturating_sub(page_size.min(total_help_lines));
+                            *scroll = (*scroll + page_size).min(max_scroll);
+                            return Ok(());
+                        }
+                        KeyCode::Home => {
+                            *scroll = 0;
+                            return Ok(());
+                        }
+                        KeyCode::End => {
+                            let max_scroll = total_help_lines.saturating_sub(page_size.min(total_help_lines));
+                            *scroll = max_scroll;
+                            return Ok(());
+                        }
+                        _ => return Ok(()),
+                    }
+                }
                 PromptState::None => {}
             }
 
@@ -1763,6 +2019,14 @@ impl Editor {
                             return Ok(());
                         }
                     }
+                    KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Char('g') | KeyCode::Char('G') => {
+                        self.prompt_state = PromptState::Help { scroll: 0 };
+                        return Ok(());
+                    }
+                    KeyCode::Backspace => {
+                        self.prompt_state = PromptState::Help { scroll: 0 };
+                        return Ok(());
+                    }
                     _ => {}
                 }
             }
@@ -1834,6 +2098,10 @@ impl Editor {
 
             // Normal typing and editing
             match key.code {
+                KeyCode::F(1) => {
+                    self.prompt_state = PromptState::Help { scroll: 0 };
+                    return Ok(());
+                }
                 KeyCode::Esc => {
                     if self.last_search.is_some() {
                         self.last_search = None;
@@ -2797,6 +3065,90 @@ mod tests {
             .unwrap();
         assert!(editor.config.warp_line);
         assert_eq!(editor.status_message, "Wrap lines: ON");
+    }
+
+    #[test]
+    fn test_help_screen_navigation_and_esc_exit() {
+        let mut editor = Editor::new(None, Config::default());
+        editor.lines = vec!["Hello world".to_string()];
+        editor.cursor_row = 0;
+        editor.cursor_col = 5;
+        editor.term_width = 80;
+        editor.term_height = 24;
+
+        // 1. Trigger Help with Ctrl+H
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('h'),
+                KeyModifiers::CONTROL,
+            )))
+            .unwrap();
+        assert_eq!(editor.prompt_state, PromptState::Help { scroll: 0 });
+
+        // 2. Scroll down in Help
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+        assert_eq!(editor.prompt_state, PromptState::Help { scroll: 1 });
+
+        // 3. Scroll up in Help
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+        assert_eq!(editor.prompt_state, PromptState::Help { scroll: 0 });
+
+        // 4. Press Esc to exit Help back to editor
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+        assert_eq!(editor.prompt_state, PromptState::None);
+        assert_eq!(editor.cursor_row, 0);
+        assert_eq!(editor.cursor_col, 5);
+
+        // 5. Open with F1
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::F(1),
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+        assert_eq!(editor.prompt_state, PromptState::Help { scroll: 0 });
+
+        // Exit with 'q'
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+        assert_eq!(editor.prompt_state, PromptState::None);
+
+        // 6. Open with Ctrl+Backspace
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::CONTROL,
+            )))
+            .unwrap();
+        assert_eq!(editor.prompt_state, PromptState::Help { scroll: 0 });
+
+        // Exit with Ctrl+C
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )))
+            .unwrap();
+        assert_eq!(editor.prompt_state, PromptState::None);
     }
 }
 
