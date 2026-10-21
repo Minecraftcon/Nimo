@@ -73,6 +73,7 @@ pub struct Config {
     pub highlight_enabled: bool,
     pub highlight_color: Color,
     pub highlight_opacity: f32,
+    pub auto_completions: bool,
 }
 
 impl Default for Config {
@@ -90,6 +91,7 @@ impl Default for Config {
             highlight_enabled: true,
             highlight_color: Palette::MAUVE,
             highlight_opacity: 0.08,
+            auto_completions: true,
         }
     }
 }
@@ -217,6 +219,9 @@ impl Config {
             "constantshow" => {
                 self.status_bar = true;
             }
+            "autocompletions" | "auto_completions" | "autopairs" | "auto_pairs" => {
+                self.auto_completions = if val.is_empty() { true } else { parse_bool(val, true) };
+            }
             _ => {}
         }
     }
@@ -235,12 +240,18 @@ impl Config {
             "constantshow" => {
                 self.status_bar = false;
             }
+            "autocompletions" | "auto_completions" | "autopairs" | "auto_pairs" => {
+                self.auto_completions = false;
+            }
             _ => {}
         }
     }
 
     fn apply_key_value(&mut self, key: &str, val: &str) {
         match key {
+            "autocompletions" | "auto_completions" | "autopairs" | "auto_pairs" => {
+                self.auto_completions = parse_bool(val, self.auto_completions);
+            }
             "highlight" | "linehighlight" | "spotlight" => {
                 self.highlight_enabled = parse_bool(val, self.highlight_enabled);
             }

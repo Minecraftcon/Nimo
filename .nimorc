@@ -39,7 +39,7 @@ Separator = true
 #   - none    : Invisible 3-space margin "   "
 # Runtime hotkey cycle: Ctrl+P or Alt+P
 SeparatorStyle = pipe
-CustomSeperator = '{line} :'
+# CustomSeperator = '{line} :'
 
 # CustomSeparator: Custom format string for the line number and separator.
 # Use '{line}' as the placeholder for the line number.
@@ -77,4 +77,16 @@ HighlightColor = mauve
 # HighlightOpacity: Opacity of the faint glow blended over background
 # Supports float (0.0 to 1.0) or percentage (e.g. 10%, 15%, 25%)
 HighlightOpacity = 0.08
+
+# ------------------------------------------------------------------------------
+# 6. Auto-Completions & Auto-Pairing (Code Files)
+# ------------------------------------------------------------------------------
+# AutoCompletions: Automatically insert matching pairs (), [], {}, "", '', ``
+# with cursor placed in between, smart skip-over on closing characters,
+# smart backspace deletion of empty pairs, and block indentation on Enter.
+# Automatically disabled by default on .txt and non-code plain text files.
+# Runtime hotkey toggle: Ctrl+Shift+A or Alt+A
+# nanorc syntax: set autocompletions / unset autocompletions
+AutoCompletions = true
+
 

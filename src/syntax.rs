@@ -24,6 +24,10 @@ pub enum Language {
 }
 
 impl Language {
+    pub fn is_code(&self) -> bool {
+        !matches!(self, Language::Plain)
+    }
+
     pub fn from_path(path: Option<&Path>) -> Self {
         let path = match path {
             Some(p) => p,

@@ -728,8 +728,24 @@ impl Editor {
                         ));
                         return Ok(());
                     }
+                    KeyCode::Char('a') | KeyCode::Char('A') => {
+                        if key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::Char('A') {
+                            self.config.auto_completions = !self.config.auto_completions;
+                            let state = if self.config.auto_completions { "ON" } else { "OFF" };
+                            self.set_status(format!("Auto-completions: {}", state));
+                            return Ok(());
+                        }
+                    }
                     _ => {}
                 }
+            }
+
+            // Alt hotkeys
+            if key.modifiers.contains(KeyModifiers::ALT) && (key.code == KeyCode::Char('a') || key.code == KeyCode::Char('A')) {
+                self.config.auto_completions = !self.config.auto_completions;
+                let state = if self.config.auto_completions { "ON" } else { "OFF" };
+                self.set_status(format!("Auto-completions: {}", state));
+                return Ok(());
             }
 
             // Normal typing and editing
@@ -799,6 +815,65 @@ impl Editor {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        let auto_complete = self.config.auto_completions && self.lang.is_code();
+
+        if auto_complete {
+            let line = &self.lines[self.cursor_row];
+            let chars: Vec<char> = line.chars().collect();
+            let next_char = chars.get(self.cursor_col).copied();
+            let prev_char = if self.cursor_col > 0 {
+                chars.get(self.cursor_col - 1).copied()
+            } else {
+                None
+            };
+
+            // 1. Skip over closing bracket/quote if already at cursor
+            if Some(c) == next_char
+                && (c == ')' || c == ']' || c == '}' || c == '"' || c == '\'' || c == '`')
+            {
+                self.cursor_col += 1;
+                return;
+            }
+
+            // 2. Auto-pair opening characters
+            let pair = match c {
+                '(' => Some(')'),
+                '[' => Some(']'),
+                '{' => Some('}'),
+                '"' => Some('"'),
+                '`' => Some('`'),
+                '\'' => {
+                    // Don't auto-pair if preceded by alphanumeric (like lifetime 'a or don't)
+                    if let Some(prev) = prev_char {
+                        if prev.is_alphanumeric() {
+                            None
+                        } else {
+                            Some('\'')
+                        }
+                    } else {
+                        Some('\'')
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(closing) = pair {
+                let line_mut = &mut self.lines[self.cursor_row];
+                let mut line_chars: Vec<char> = line_mut.chars().collect();
+                if self.cursor_col >= line_chars.len() {
+                    line_chars.push(c);
+                    line_chars.push(closing);
+                } else {
+                    line_chars.insert(self.cursor_col, c);
+                    line_chars.insert(self.cursor_col + 1, closing);
+                }
+                *line_mut = line_chars.into_iter().collect();
+                self.cursor_col += 1;
+                self.update_modified_status();
+                return;
+            }
+        }
+
         let line = &mut self.lines[self.cursor_row];
         let mut chars: Vec<char> = line.chars().collect();
 
@@ -816,6 +891,42 @@ impl Editor {
     pub fn insert_newline(&mut self) {
         let current_line = &self.lines[self.cursor_row];
         let chars: Vec<char> = current_line.chars().collect();
+        let auto_complete = self.config.auto_completions && self.lang.is_code();
+
+        // Smart Enter between { and }
+        if auto_complete
+            && self.cursor_col > 0
+            && chars.get(self.cursor_col - 1) == Some(&'{')
+            && chars.get(self.cursor_col) == Some(&'}')
+        {
+            let leading_spaces: usize = current_line.chars().take_while(|c| *c == ' ').count();
+            let base_indent = " ".repeat(leading_spaces);
+            let inner_indent = " ".repeat(leading_spaces + 4);
+
+            let (left, right) = chars.split_at(self.cursor_col);
+            let new_left: String = left.iter().collect();
+            let new_right: String = right.iter().collect();
+
+            self.lines[self.cursor_row] = new_left;
+            self.lines.insert(self.cursor_row + 1, inner_indent.clone());
+            self.lines.insert(
+                self.cursor_row + 2,
+                format!("{}{}", base_indent, new_right.trim_start()),
+            );
+
+            self.cursor_row += 1;
+            self.cursor_col = inner_indent.len();
+            self.update_modified_status();
+            return;
+        }
+
+        // Standard newline with auto-indentation on code files
+        let leading_spaces: usize = if auto_complete {
+            current_line.chars().take_while(|c| *c == ' ').count()
+        } else {
+            0
+        };
+        let indent = " ".repeat(leading_spaces);
 
         let (left, right) = if self.cursor_col >= chars.len() {
             (chars.as_slice(), &[][..])
@@ -824,20 +935,45 @@ impl Editor {
         };
 
         let new_left: String = left.iter().collect();
-        let new_right: String = right.iter().collect();
+        let new_right: String = format!("{}{}", indent, right.iter().collect::<String>().trim_start());
 
         self.lines[self.cursor_row] = new_left;
         self.lines.insert(self.cursor_row + 1, new_right);
 
         self.cursor_row += 1;
-        self.cursor_col = 0;
+        self.cursor_col = leading_spaces;
         self.update_modified_status();
     }
 
     pub fn delete_backspace(&mut self) {
         if self.cursor_col > 0 {
+            let auto_complete = self.config.auto_completions && self.lang.is_code();
             let line = &mut self.lines[self.cursor_row];
             let mut chars: Vec<char> = line.chars().collect();
+
+            // Smart backspace: delete both opening and closing if empty pair
+            if auto_complete {
+                let prev = chars[self.cursor_col - 1];
+                let next = chars.get(self.cursor_col).copied();
+                let is_pair = matches!(
+                    (prev, next),
+                    ('(', Some(')'))
+                        | ('[', Some(']'))
+                        | ('{', Some('}'))
+                        | ('"', Some('"'))
+                        | ('\'', Some('\''))
+                        | ('`', Some('`'))
+                );
+                if is_pair {
+                    chars.remove(self.cursor_col);
+                    chars.remove(self.cursor_col - 1);
+                    *line = chars.into_iter().collect();
+                    self.cursor_col -= 1;
+                    self.update_modified_status();
+                    return;
+                }
+            }
+
             chars.remove(self.cursor_col - 1);
             *line = chars.into_iter().collect();
             self.cursor_col -= 1;
@@ -999,5 +1135,60 @@ mod tests {
 
         editor.delete_backspace();
         assert!(!editor.is_modified);
+    }
+
+    #[test]
+    fn test_auto_pair_and_skip_over_code_file() {
+        let mut editor = Editor::new(Some(PathBuf::from("test.c")), Config::default());
+        assert_eq!(editor.lang, Language::C);
+        assert!(editor.lang.is_code());
+
+        // Type '(' -> should insert "()" with cursor in between (col 1)
+        editor.insert_char('(');
+        assert_eq!(editor.lines[0], "()");
+        assert_eq!(editor.cursor_col, 1);
+
+        // Type ')' -> should skip over, not duplicate
+        editor.insert_char(')');
+        assert_eq!(editor.lines[0], "()");
+        assert_eq!(editor.cursor_col, 2);
+
+        // Type '{' -> should append "{}" and place cursor inside
+        editor.insert_char('{');
+        assert_eq!(editor.lines[0], "(){}");
+        assert_eq!(editor.cursor_col, 3);
+
+        // Press Enter inside '{}' -> should expand to 3 lines with 4 spaces indent
+        editor.insert_newline();
+        assert_eq!(editor.lines.len(), 3);
+        assert_eq!(editor.lines[0], "(){");
+        assert_eq!(editor.lines[1], "    ");
+        assert_eq!(editor.lines[2], "}");
+        assert_eq!(editor.cursor_row, 1);
+        assert_eq!(editor.cursor_col, 4);
+    }
+
+    #[test]
+    fn test_auto_pair_smart_backspace() {
+        let mut editor = Editor::new(Some(PathBuf::from("test.rs")), Config::default());
+        editor.insert_char('[');
+        assert_eq!(editor.lines[0], "[]");
+        assert_eq!(editor.cursor_col, 1);
+
+        editor.delete_backspace();
+        assert_eq!(editor.lines[0], "");
+        assert_eq!(editor.cursor_col, 0);
+    }
+
+    #[test]
+    fn test_auto_pair_disabled_on_plain_text() {
+        let mut editor = Editor::new(Some(PathBuf::from("notes.txt")), Config::default());
+        assert_eq!(editor.lang, Language::Plain);
+        assert!(!editor.lang.is_code());
+
+        // Type '(' on txt file -> should insert single '(' without auto-closing
+        editor.insert_char('(');
+        assert_eq!(editor.lines[0], "(");
+        assert_eq!(editor.cursor_col, 1);
     }
 }
