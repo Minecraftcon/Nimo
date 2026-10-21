@@ -69,7 +69,18 @@ Footer = true
 ### Requirements
 - Rust & Cargo (1.70+)
 
-### Compiling
+### Compiling & Setup
+
+Using the universal build script (dynamically detects Termux or Linux desktop):
+```bash
+# Build binary to ./nimo
+./build.sh
+
+# Or install system-wide ($PREFIX/bin on Termux, /usr/local/bin on Linux)
+./build.sh install
+```
+
+Or manually with Cargo:
 ```bash
 cargo build --release
 cp target/release/nimo ./nimo
