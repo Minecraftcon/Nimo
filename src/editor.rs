@@ -196,6 +196,84 @@ impl Editor {
         self.find_next_match_wrapped(query, skip_current).0
     }
 
+    /// Search backwards for `query` in buffer from current cursor position.
+    /// Returns `(found, wrapped)` indicating if a match was found and if wrap-around occurred.
+    pub fn find_prev_match_wrapped(&mut self, query: &str) -> (bool, bool) {
+        if query.is_empty() || self.lines.is_empty() {
+            return (false, false);
+        }
+
+        let start_row = self.cursor_row.min(self.lines.len() - 1);
+        let start_col = self.cursor_col;
+
+        // 1. Current line before cursor
+        let matches = find_all_matches_in_line(&self.lines[start_row], query);
+        for &(m_start, _) in matches.iter().rev() {
+            if m_start < start_col {
+                self.cursor_row = start_row;
+                self.cursor_col = m_start;
+                return (true, false);
+            }
+        }
+
+        // 2. Lines before current line (in reverse order)
+        for r in (0..start_row).rev() {
+            let m = find_all_matches_in_line(&self.lines[r], query);
+            if let Some(&(m_start, _)) = m.last() {
+                self.cursor_row = r;
+                self.cursor_col = m_start;
+                return (true, false);
+            }
+        }
+
+        // 3. Wrap around: Lines after current line from end of file down to start_row + 1
+        for r in ((start_row + 1)..self.lines.len()).rev() {
+            let m = find_all_matches_in_line(&self.lines[r], query);
+            if let Some(&(m_start, _)) = m.last() {
+                self.cursor_row = r;
+                self.cursor_col = m_start;
+                return (true, true);
+            }
+        }
+
+        // 4. Wrap around: Current line at or after cursor (the latest match on start_row)
+        for &(m_start, _) in matches.iter().rev() {
+            if m_start >= start_col {
+                self.cursor_row = start_row;
+                self.cursor_col = m_start;
+                return (true, true);
+            }
+        }
+
+        (false, false)
+    }
+
+    #[allow(dead_code)]
+    pub fn find_prev_match(&mut self, query: &str) -> bool {
+        self.find_prev_match_wrapped(query).0
+    }
+
+    /// Count total matches and current match index (1-based) in the buffer.
+    pub fn count_all_matches(&self, query: &str) -> (usize, usize) {
+        if query.is_empty() {
+            return (0, 0);
+        }
+        let mut total = 0;
+        let mut current_idx = 0;
+
+        for (r, line) in self.lines.iter().enumerate() {
+            let matches = find_all_matches_in_line(line, query);
+            for &(m_start, _) in &matches {
+                total += 1;
+                if r < self.cursor_row || (r == self.cursor_row && m_start <= self.cursor_col) {
+                    current_idx = total;
+                }
+            }
+        }
+
+        (current_idx, total)
+    }
+
     /// Height available for text rows
     pub fn text_area_height(&self) -> usize {
         let mut h = self.term_height as usize;
@@ -584,14 +662,31 @@ impl Editor {
                     " Save modified buffer? [y/n] ".to_string()
                 }
                 PromptState::Search { query, .. } => {
+                    let active_q = if !query.is_empty() {
+                        query.as_str()
+                    } else if let Some(ref last) = self.last_search {
+                        last.as_str()
+                    } else {
+                        ""
+                    };
+
+                    let (curr, total) = self.count_all_matches(active_q);
+                    let count_str = if total > 0 {
+                        format!(" [{}/{}]", curr, total)
+                    } else if !active_q.is_empty() {
+                        " [0/0]".to_string()
+                    } else {
+                        String::new()
+                    };
+
                     if query.is_empty() {
                         if let Some(ref last) = self.last_search {
-                            format!(" Search [{}]: ", last)
+                            format!(" Search [{}]{}: ", last, count_str)
                         } else {
                             " Search: ".to_string()
                         }
                     } else {
-                        format!(" Search: {}", query)
+                        format!(" Search: {}{}", query, count_str)
                     }
                 }
                 PromptState::None => {
@@ -634,11 +729,11 @@ impl Editor {
                     ("", ""),
                 ],
                 PromptState::Search { .. } => [
-                    ("Enter", "FindNext"),
+                    ("Enter", "NextMatch"),
+                    ("Up", "PrevMatch"),
+                    ("Down", "NextMatch"),
+                    ("Esc", "Stop/Edit"),
                     ("^C", "Cancel"),
-                    ("^W", "NextMatch"),
-                    ("", ""),
-                    ("", ""),
                     ("", ""),
                 ],
                 PromptState::None => [
@@ -652,13 +747,21 @@ impl Editor {
             };
 
             let row2 = match &self.prompt_state {
+                PromptState::Search { .. } => [
+                    ("Alt+W", "NextMatch"),
+                    ("Alt+Q", "PrevMatch"),
+                    ("", ""),
+                    ("", ""),
+                    ("", ""),
+                    ("", ""),
+                ],
                 PromptState::None => [
-                    ("^B", "BlinkCur"),
-                    ("^P", "SepStyle"),
+                    ("Alt+W", "FindNext"),
+                    ("Alt+Q", "FindPrev"),
                     ("^C", "CurPos"),
                     ("^W", "WhereIs"),
-                    ("^J", "Justify"),
-                    ("^G", "GetHelp"),
+                    ("^B", "BlinkCur"),
+                    ("^P", "SepStyle"),
                 ],
                 _ => [
                     ("", ""),
@@ -900,10 +1003,56 @@ impl Editor {
                         }
                     }
 
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        if key.code == KeyCode::Char('w') || key.code == KeyCode::Char('W') {
+                            let q = if !query.is_empty() {
+                                query.clone()
+                            } else if let Some(ref last) = self.last_search {
+                                last.clone()
+                            } else {
+                                return Ok(());
+                            };
+                            self.last_search = Some(q.clone());
+                            let (found, wrapped) = self.find_next_match_wrapped(&q, true);
+                            if found {
+                                let (curr, total) = self.count_all_matches(&q);
+                                if wrapped {
+                                    self.set_status(format!("[Search wrapped] Search: \"{}\" [{}/{}]", q, curr, total));
+                                } else {
+                                    self.set_status("");
+                                }
+                            } else {
+                                self.set_status(format!("\"{}\" not found", q));
+                            }
+                            return Ok(());
+                        }
+                        if key.code == KeyCode::Char('q') || key.code == KeyCode::Char('Q') {
+                            let q = if !query.is_empty() {
+                                query.clone()
+                            } else if let Some(ref last) = self.last_search {
+                                last.clone()
+                            } else {
+                                return Ok(());
+                            };
+                            self.last_search = Some(q.clone());
+                            let (found, wrapped) = self.find_prev_match_wrapped(&q);
+                            if found {
+                                let (curr, total) = self.count_all_matches(&q);
+                                if wrapped {
+                                    self.set_status(format!("[Search wrapped] Search: \"{}\" [{}/{}]", q, curr, total));
+                                } else {
+                                    self.set_status("");
+                                }
+                            } else {
+                                self.set_status(format!("\"{}\" not found", q));
+                            }
+                            return Ok(());
+                        }
+                    }
+
                     match key.code {
                         KeyCode::Enter => {
-                            let is_query_empty = query.is_empty();
-                            let q = if !is_query_empty {
+                            let q = if !query.is_empty() {
                                 query.clone()
                             } else if let Some(ref last) = self.last_search {
                                 last.clone()
@@ -914,22 +1063,77 @@ impl Editor {
                             };
 
                             self.last_search = Some(q.clone());
-                            self.prompt_state = PromptState::None;
 
-                            let (found, wrapped) = if is_query_empty {
-                                self.find_next_match_wrapped(&q, true)
-                            } else {
-                                self.find_next_match_wrapped(&q, false)
-                            };
-
+                            // Jump to NEXT match without closing prompt!
+                            let (found, wrapped) = self.find_next_match_wrapped(&q, true);
                             if found {
+                                let (curr, total) = self.count_all_matches(&q);
                                 if wrapped {
-                                    self.set_status(format!("Search: \"{}\" [Search wrapped]", q));
+                                    self.set_status(format!("[Search wrapped] Search: \"{}\" [{}/{}]", q, curr, total));
                                 } else {
-                                    self.set_status(format!("Search: \"{}\"", q));
+                                    self.set_status("");
                                 }
                             } else {
                                 self.set_status(format!("\"{}\" not found", q));
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::Down => {
+                            let q = if !query.is_empty() {
+                                query.clone()
+                            } else if let Some(ref last) = self.last_search {
+                                last.clone()
+                            } else {
+                                return Ok(());
+                            };
+                            self.last_search = Some(q.clone());
+                            let (found, wrapped) = self.find_next_match_wrapped(&q, true);
+                            if found {
+                                let (curr, total) = self.count_all_matches(&q);
+                                if wrapped {
+                                    self.set_status(format!("[Search wrapped] Search: \"{}\" [{}/{}]", q, curr, total));
+                                } else {
+                                    self.set_status("");
+                                }
+                            } else {
+                                self.set_status(format!("\"{}\" not found", q));
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::Up => {
+                            let q = if !query.is_empty() {
+                                query.clone()
+                            } else if let Some(ref last) = self.last_search {
+                                last.clone()
+                            } else {
+                                return Ok(());
+                            };
+                            self.last_search = Some(q.clone());
+                            let (found, wrapped) = self.find_prev_match_wrapped(&q);
+                            if found {
+                                let (curr, total) = self.count_all_matches(&q);
+                                if wrapped {
+                                    self.set_status(format!("[Search wrapped] Search: \"{}\" [{}/{}]", q, curr, total));
+                                } else {
+                                    self.set_status("");
+                                }
+                            } else {
+                                self.set_status(format!("\"{}\" not found", q));
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::Esc => {
+                            // Finish search prompt and keep cursor at current match ready for editing!
+                            if !query.is_empty() {
+                                self.last_search = Some(query.clone());
+                            }
+                            self.prompt_state = PromptState::None;
+                            let q = self.last_search.as_deref().unwrap_or("");
+                            let (curr, total) = self.count_all_matches(q);
+                            if total > 0 {
+                                self.set_status(format!("Search: \"{}\" [{}/{}]", q, curr, total));
+                            } else {
+                                self.set_status("");
                             }
                             return Ok(());
                         }
@@ -966,35 +1170,6 @@ impl Editor {
                             } else {
                                 self.set_status("");
                             }
-                            return Ok(());
-                        }
-                        KeyCode::Down => {
-                            let q = if !query.is_empty() {
-                                query.clone()
-                            } else if let Some(ref last) = self.last_search {
-                                last.clone()
-                            } else {
-                                return Ok(());
-                            };
-                            self.last_search = Some(q.clone());
-                            let (found, wrapped) = self.find_next_match_wrapped(&q, true);
-                            if found {
-                                if wrapped {
-                                    self.set_status(format!("Search: \"{}\" [Search wrapped]", q));
-                                } else {
-                                    self.set_status(format!("Search: \"{}\"", q));
-                                }
-                            } else {
-                                self.set_status(format!("\"{}\" not found", q));
-                            }
-                            return Ok(());
-                        }
-                        KeyCode::Esc => {
-                            let (r, c) = *origin;
-                            self.cursor_row = r;
-                            self.cursor_col = c;
-                            self.prompt_state = PromptState::None;
-                            self.set_status("[Search cancelled]");
                             return Ok(());
                         }
                         _ => return Ok(()),
@@ -1104,14 +1279,41 @@ impl Editor {
                 return Ok(());
             }
 
-            if key.modifiers.contains(KeyModifiers::ALT) && (key.code == KeyCode::Char('w') || key.code == KeyCode::Char('W')) {
+            let is_next = (key.modifiers.contains(KeyModifiers::ALT) && (key.code == KeyCode::Char('w') || key.code == KeyCode::Char('W')))
+                || (key.code == KeyCode::F(3) && !key.modifiers.contains(KeyModifiers::SHIFT));
+
+            if is_next {
                 if let Some(ref q) = self.last_search.clone() {
                     let (found, wrapped) = self.find_next_match_wrapped(q, true);
                     if found {
+                        let (curr, total) = self.count_all_matches(q);
                         if wrapped {
-                            self.set_status(format!("Search: \"{}\" [Search wrapped]", q));
+                            self.set_status(format!("[Search wrapped] Search: \"{}\" [{}/{}]", q, curr, total));
                         } else {
-                            self.set_status(format!("Search: \"{}\"", q));
+                            self.set_status(format!("Search: \"{}\" [{}/{}]", q, curr, total));
+                        }
+                    } else {
+                        self.set_status(format!("\"{}\" not found", q));
+                    }
+                } else {
+                    self.set_status("No previous search");
+                }
+                return Ok(());
+            }
+
+            let is_prev = (key.modifiers.contains(KeyModifiers::ALT) && (key.code == KeyCode::Char('q') || key.code == KeyCode::Char('Q')))
+                || (key.code == KeyCode::F(3) && key.modifiers.contains(KeyModifiers::SHIFT))
+                || key.code == KeyCode::F(4);
+
+            if is_prev {
+                if let Some(ref q) = self.last_search.clone() {
+                    let (found, wrapped) = self.find_prev_match_wrapped(q);
+                    if found {
+                        let (curr, total) = self.count_all_matches(q);
+                        if wrapped {
+                            self.set_status(format!("[Search wrapped] Search: \"{}\" [{}/{}]", q, curr, total));
+                        } else {
+                            self.set_status(format!("Search: \"{}\" [{}/{}]", q, curr, total));
                         }
                     } else {
                         self.set_status(format!("\"{}\" not found", q));
@@ -1624,7 +1826,42 @@ mod tests {
     }
 
     #[test]
-    fn test_search_prompt_realtime_and_cancel() {
+    fn test_count_all_matches_and_find_prev() {
+        let mut editor = Editor::new(None, Config::default());
+        editor.lines = vec![
+            "pub fn one() {}".to_string(),
+            "pub fn two() {}".to_string(),
+            "pub fn three() {}".to_string(),
+        ];
+        editor.cursor_row = 0;
+        editor.cursor_col = 0;
+
+        let (curr, total) = editor.count_all_matches("pub");
+        assert_eq!(total, 3);
+        assert_eq!(curr, 1);
+
+        // Move to line 1
+        editor.cursor_row = 1;
+        editor.cursor_col = 0;
+        let (curr, total) = editor.count_all_matches("pub");
+        assert_eq!(total, 3);
+        assert_eq!(curr, 2);
+
+        // Find prev match from line 1 -> should go to line 0
+        let (found, wrapped) = editor.find_prev_match_wrapped("pub");
+        assert!(found);
+        assert!(!wrapped);
+        assert_eq!(editor.cursor_row, 0);
+
+        // Find prev match from line 0 -> should wrap around to line 2
+        let (found, wrapped) = editor.find_prev_match_wrapped("pub");
+        assert!(found);
+        assert!(wrapped);
+        assert_eq!(editor.cursor_row, 2);
+    }
+
+    #[test]
+    fn test_search_prompt_realtime_and_cancel_with_ctrl_c() {
         let mut editor = Editor::new(None, Config::default());
         editor.lines = vec![
             "fn main() {".to_string(),
@@ -1665,11 +1902,11 @@ mod tests {
         assert_eq!(editor.cursor_row, 1);
         assert_eq!(editor.cursor_col, 8);
 
-        // Cancel with Esc -> cursor restores to (0, 0)
+        // Cancel with Ctrl+C -> cursor restores to origin (0, 0)
         editor
             .handle_event(Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Esc,
-                KeyModifiers::NONE,
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
             )))
             .unwrap();
 
@@ -1680,7 +1917,7 @@ mod tests {
     }
 
     #[test]
-    fn test_search_prompt_enter_and_repeat_alt_w() {
+    fn test_search_prompt_enter_cycle_and_esc_finish() {
         let mut editor = Editor::new(None, Config::default());
         editor.lines = vec![
             "let alpha = 1;".to_string(),
@@ -1707,10 +1944,37 @@ mod tests {
                 .unwrap();
         }
 
-        // Press Enter to confirm search
+        // Initially at match 1 (line 0, col 4)
+        assert_eq!(editor.cursor_row, 0);
+        assert_eq!(editor.cursor_col, 4);
+
+        // Press Enter to cycle to NEXT match (line 2, col 4) without exiting prompt!
         editor
             .handle_event(Event::Key(crossterm::event::KeyEvent::new(
                 KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+
+        assert!(matches!(editor.prompt_state, PromptState::Search { .. }));
+        assert_eq!(editor.cursor_row, 2);
+        assert_eq!(editor.cursor_col, 4);
+
+        // Press Up to navigate to PREVIOUS match (line 0, col 4)
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+
+        assert_eq!(editor.cursor_row, 0);
+        assert_eq!(editor.cursor_col, 4);
+
+        // Press Esc to finish search and edit at current match
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
                 KeyModifiers::NONE,
             )))
             .unwrap();
@@ -1720,7 +1984,7 @@ mod tests {
         assert_eq!(editor.cursor_row, 0);
         assert_eq!(editor.cursor_col, 4);
 
-        // Press Alt+W to repeat last search (Find Next)
+        // Press Alt+W to repeat last search in normal mode (Find Next)
         editor
             .handle_event(Event::Key(crossterm::event::KeyEvent::new(
                 KeyCode::Char('w'),
@@ -1731,10 +1995,10 @@ mod tests {
         assert_eq!(editor.cursor_row, 2);
         assert_eq!(editor.cursor_col, 4);
 
-        // Press Alt+W again -> wraps around to line 0
+        // Press Alt+Q to repeat last search backwards (Find Prev)
         editor
             .handle_event(Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Char('w'),
+                KeyCode::Char('q'),
                 KeyModifiers::ALT,
             )))
             .unwrap();
