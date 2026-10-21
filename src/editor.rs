@@ -20,6 +20,7 @@ pub enum PromptState {
     None,
     SaveConfirm { input: String, quit_after: bool },
     ExitConfirm,
+    Search { query: String, origin: (usize, usize) },
 }
 
 pub struct Editor {
@@ -40,6 +41,46 @@ pub struct Editor {
     pub term_width: u16,
     pub term_height: u16,
     pub prompt_state: PromptState,
+    pub last_search: Option<String>,
+}
+
+/// Find all non-overlapping matches of `query` in `line`, case-insensitively.
+/// Returns a Vec of `(char_start, char_end)` character indices.
+pub fn find_all_matches_in_line(line: &str, query: &str) -> Vec<(usize, usize)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let query_chars: Vec<char> = query.to_lowercase().chars().collect();
+    let line_chars: Vec<char> = line.chars().collect();
+    let q_len = query_chars.len();
+    let l_len = line_chars.len();
+    if q_len == 0 || l_len < q_len {
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+    let mut i = 0;
+    while i + q_len <= l_len {
+        let mut matched = true;
+        for k in 0..q_len {
+            let line_c_lowers: Vec<char> = line_chars[i + k].to_lowercase().collect();
+            if line_c_lowers.len() == 1 && line_c_lowers[0] == query_chars[k] {
+                continue;
+            }
+            if line_chars[i + k] == query_chars[k] {
+                continue;
+            }
+            matched = false;
+            break;
+        }
+        if matched {
+            matches.push((i, i + q_len));
+            i += q_len;
+        } else {
+            i += 1;
+        }
+    }
+    matches
 }
 
 impl Editor {
@@ -83,6 +124,7 @@ impl Editor {
             term_width,
             term_height,
             prompt_state: PromptState::None,
+            last_search: None,
         }
     }
 
@@ -93,6 +135,65 @@ impl Editor {
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status_message = msg.into();
         self.status_time = Some(Instant::now());
+    }
+
+    /// Search for `query` in buffer starting from current cursor position.
+    /// If `skip_current` is true, skips any match at current cursor position (for Find Next).
+    /// Returns `(found, wrapped)` indicating if a match was found and if wrap-around occurred.
+    pub fn find_next_match_wrapped(&mut self, query: &str, skip_current: bool) -> (bool, bool) {
+        if query.is_empty() || self.lines.is_empty() {
+            return (false, false);
+        }
+
+        let start_row = self.cursor_row.min(self.lines.len() - 1);
+        let start_col = self.cursor_col;
+
+        // 1. Current line after or at cursor
+        let matches = find_all_matches_in_line(&self.lines[start_row], query);
+        for &(m_start, _) in &matches {
+            if (skip_current && m_start > start_col) || (!skip_current && m_start >= start_col) {
+                self.cursor_row = start_row;
+                self.cursor_col = m_start;
+                return (true, false);
+            }
+        }
+
+        // 2. Lines after current line
+        for r in (start_row + 1)..self.lines.len() {
+            let m = find_all_matches_in_line(&self.lines[r], query);
+            if let Some(&(m_start, _)) = m.first() {
+                self.cursor_row = r;
+                self.cursor_col = m_start;
+                return (true, false);
+            }
+        }
+
+        // 3. Wrap around: Lines from 0 to start_row - 1
+        for r in 0..start_row {
+            let m = find_all_matches_in_line(&self.lines[r], query);
+            if let Some(&(m_start, _)) = m.first() {
+                self.cursor_row = r;
+                self.cursor_col = m_start;
+                return (true, true);
+            }
+        }
+
+        // 4. Wrap around: Current line before or at cursor
+        for &(m_start, _) in &matches {
+            if m_start <= start_col {
+                self.cursor_row = start_row;
+                self.cursor_col = m_start;
+                let wrapped = skip_current || m_start < start_col;
+                return (true, wrapped);
+            }
+        }
+
+        (false, false)
+    }
+
+    #[allow(dead_code)]
+    pub fn find_next_match(&mut self, query: &str, skip_current: bool) -> bool {
+        self.find_next_match_wrapped(query, skip_current).0
     }
 
     /// Height available for text rows
@@ -341,41 +442,122 @@ impl Editor {
                 let line = &self.lines[row_idx];
                 let spans = highlight_line(line, self.lang);
 
-                let mut current_col: usize = 0;
-                let mut rendered_w: usize = 0;
+                let active_query: Option<&str> = match &self.prompt_state {
+                    PromptState::Search { query, .. } => {
+                        if !query.is_empty() {
+                            Some(query.as_str())
+                        } else {
+                            self.last_search.as_deref().filter(|s| !s.is_empty())
+                        }
+                    }
+                    _ => self.last_search.as_deref().filter(|s| !s.is_empty()),
+                };
 
-                for span in spans {
-                    let span_len = span.text.chars().count();
-                    let span_end = current_col + span_len;
+                let line_matches = if let Some(q) = active_query {
+                    find_all_matches_in_line(line, q)
+                } else {
+                    Vec::new()
+                };
 
-                    // If span overlaps with [col_offset, col_offset + available_w]
-                    if span_end > self.col_offset && current_col < self.col_offset + available_w {
-                        let slice_start = self.col_offset.saturating_sub(current_col);
-                        let chars: Vec<char> = span.text.chars().collect();
-                        let max_take = (self.col_offset + available_w).saturating_sub(current_col + slice_start);
-                        let visible_slice: String = chars
-                            .into_iter()
-                            .skip(slice_start)
-                            .take(max_take)
-                            .collect();
+                if line_matches.is_empty() {
+                    let mut current_col: usize = 0;
+                    let mut rendered_w: usize = 0;
 
-                        let slice_w = visible_slice.chars().count();
-                        if slice_w > 0 {
-                            queue!(stdout, SetForegroundColor(span.color))?;
-                            write!(stdout, "{}", visible_slice)?;
-                            rendered_w += slice_w;
+                    for span in spans {
+                        let span_len = span.text.chars().count();
+                        let span_end = current_col + span_len;
+
+                        // If span overlaps with [col_offset, col_offset + available_w]
+                        if span_end > self.col_offset && current_col < self.col_offset + available_w {
+                            let slice_start = self.col_offset.saturating_sub(current_col);
+                            let chars: Vec<char> = span.text.chars().collect();
+                            let max_take = (self.col_offset + available_w).saturating_sub(current_col + slice_start);
+                            let visible_slice: String = chars
+                                .into_iter()
+                                .skip(slice_start)
+                                .take(max_take)
+                                .collect();
+
+                            let slice_w = visible_slice.chars().count();
+                            if slice_w > 0 {
+                                queue!(stdout, SetForegroundColor(span.color))?;
+                                write!(stdout, "{}", visible_slice)?;
+                                rendered_w += slice_w;
+                            }
+                        }
+
+                        current_col = span_end;
+                        if current_col >= self.col_offset + available_w {
+                            break;
                         }
                     }
 
-                    current_col = span_end;
-                    if current_col >= self.col_offset + available_w {
-                        break;
+                    if rendered_w < available_w {
+                        queue!(stdout, SetBackgroundColor(line_bg), SetForegroundColor(Palette::TEXT))?;
+                        write!(stdout, "{}", " ".repeat(available_w - rendered_w))?;
                     }
-                }
+                } else {
+                    // Line contains search matches: highlight them with Catppuccin Mocha colors
+                    let mut line_chars_styled: Vec<(char, crossterm::style::Color)> = Vec::with_capacity(line.chars().count());
+                    for span in spans {
+                        for c in span.text.chars() {
+                            line_chars_styled.push((c, span.color));
+                        }
+                    }
 
-                if rendered_w < available_w {
-                    queue!(stdout, SetForegroundColor(Palette::TEXT))?;
-                    write!(stdout, "{}", " ".repeat(available_w - rendered_w))?;
+                    let visible_start = self.col_offset;
+                    let visible_end = (self.col_offset + available_w).min(line_chars_styled.len());
+
+                    let mut chunks: Vec<(String, crossterm::style::Color, crossterm::style::Color)> = Vec::new();
+
+                    for c_idx in visible_start..visible_end {
+                        let (c, syntax_fg) = line_chars_styled[c_idx];
+                        let mut fg = syntax_fg;
+                        let mut bg = line_bg;
+
+                        for &(m_start, m_end) in &line_matches {
+                            if c_idx >= m_start && c_idx < m_end {
+                                let is_active = row_idx == self.cursor_row
+                                    && (self.cursor_col == m_start || (self.cursor_col > m_start && self.cursor_col < m_end));
+                                if is_active {
+                                    bg = Palette::PEACH;
+                                    fg = Palette::CRUST;
+                                } else {
+                                    bg = Palette::YELLOW;
+                                    fg = Palette::CRUST;
+                                }
+                                break;
+                            }
+                        }
+
+                        if let Some(last) = chunks.last_mut() {
+                            if last.1 == fg && last.2 == bg {
+                                last.0.push(c);
+                                continue;
+                            }
+                        }
+                        chunks.push((c.to_string(), fg, bg));
+                    }
+
+                    let mut rendered_w: usize = 0;
+                    for (chunk_str, chunk_fg, chunk_bg) in chunks {
+                        queue!(
+                            stdout,
+                            SetBackgroundColor(chunk_bg),
+                            SetForegroundColor(chunk_fg)
+                        )?;
+                        write!(stdout, "{}", chunk_str)?;
+                        rendered_w += chunk_str.chars().count();
+                    }
+
+                    if rendered_w < available_w {
+                        queue!(
+                            stdout,
+                            SetBackgroundColor(line_bg),
+                            SetForegroundColor(Palette::TEXT)
+                        )?;
+                        write!(stdout, "{}", " ".repeat(available_w - rendered_w))?;
+                    }
                 }
             } else {
                 write!(stdout, "{}", " ".repeat(available_w))?;
@@ -400,6 +582,17 @@ impl Editor {
                 }
                 PromptState::ExitConfirm => {
                     " Save modified buffer? [y/n] ".to_string()
+                }
+                PromptState::Search { query, .. } => {
+                    if query.is_empty() {
+                        if let Some(ref last) = self.last_search {
+                            format!(" Search [{}]: ", last)
+                        } else {
+                            " Search: ".to_string()
+                        }
+                    } else {
+                        format!(" Search: {}", query)
+                    }
                 }
                 PromptState::None => {
                     if let Some(time) = self.status_time {
@@ -436,6 +629,14 @@ impl Editor {
                     ("Y", "Yes"),
                     ("N", "No"),
                     ("^C", "Cancel"),
+                    ("", ""),
+                    ("", ""),
+                    ("", ""),
+                ],
+                PromptState::Search { .. } => [
+                    ("Enter", "FindNext"),
+                    ("^C", "Cancel"),
+                    ("^W", "NextMatch"),
                     ("", ""),
                     ("", ""),
                     ("", ""),
@@ -484,6 +685,20 @@ impl Editor {
             PromptState::ExitConfirm => {
                 let prompt_str = " Save modified buffer? [y/n] ";
                 let cursor_x = prompt_str.chars().count().min(self.term_width as usize - 1) as u16;
+                (cursor_x, status_row_y)
+            }
+            PromptState::Search { query, .. } => {
+                let prompt_prefix = if query.is_empty() {
+                    if let Some(ref last) = self.last_search {
+                        format!(" Search [{}]: ", last)
+                    } else {
+                        " Search: ".to_string()
+                    }
+                } else {
+                    " Search: ".to_string()
+                };
+                let cursor_x = (prompt_prefix.chars().count() + query.chars().count())
+                    .min(self.term_width as usize - 1) as u16;
                 (cursor_x, status_row_y)
             }
             PromptState::None => {
@@ -652,6 +867,139 @@ impl Editor {
                         _ => return Ok(()),
                     }
                 }
+                PromptState::Search { query, origin } => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        if key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C') {
+                            let (r, c) = *origin;
+                            self.cursor_row = r;
+                            self.cursor_col = c;
+                            self.prompt_state = PromptState::None;
+                            self.set_status("[Search cancelled]");
+                            return Ok(());
+                        }
+                        if key.code == KeyCode::Char('w') || key.code == KeyCode::Char('W') {
+                            let q = if !query.is_empty() {
+                                query.clone()
+                            } else if let Some(ref last) = self.last_search {
+                                last.clone()
+                            } else {
+                                return Ok(());
+                            };
+                            self.last_search = Some(q.clone());
+                            let (found, wrapped) = self.find_next_match_wrapped(&q, true);
+                            if found {
+                                if wrapped {
+                                    self.set_status(format!("Search: \"{}\" [Search wrapped]", q));
+                                } else {
+                                    self.set_status(format!("Search: \"{}\"", q));
+                                }
+                            } else {
+                                self.set_status(format!("\"{}\" not found", q));
+                            }
+                            return Ok(());
+                        }
+                    }
+
+                    match key.code {
+                        KeyCode::Enter => {
+                            let is_query_empty = query.is_empty();
+                            let q = if !is_query_empty {
+                                query.clone()
+                            } else if let Some(ref last) = self.last_search {
+                                last.clone()
+                            } else {
+                                self.prompt_state = PromptState::None;
+                                self.set_status("[Search cancelled]");
+                                return Ok(());
+                            };
+
+                            self.last_search = Some(q.clone());
+                            self.prompt_state = PromptState::None;
+
+                            let (found, wrapped) = if is_query_empty {
+                                self.find_next_match_wrapped(&q, true)
+                            } else {
+                                self.find_next_match_wrapped(&q, false)
+                            };
+
+                            if found {
+                                if wrapped {
+                                    self.set_status(format!("Search: \"{}\" [Search wrapped]", q));
+                                } else {
+                                    self.set_status(format!("Search: \"{}\"", q));
+                                }
+                            } else {
+                                self.set_status(format!("\"{}\" not found", q));
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            query.push(c);
+                            let q = query.clone();
+                            let orig = *origin;
+                            self.cursor_row = orig.0;
+                            self.cursor_col = orig.1;
+                            let (found, _) = self.find_next_match_wrapped(&q, false);
+                            if !found {
+                                self.set_status(format!("\"{}\" not found", q));
+                            } else {
+                                self.set_status("");
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::Backspace => {
+                            query.pop();
+                            let q = query.clone();
+                            let orig = *origin;
+                            self.cursor_row = orig.0;
+                            self.cursor_col = orig.1;
+                            if !q.is_empty() {
+                                let (found, _) = self.find_next_match_wrapped(&q, false);
+                                if !found {
+                                    self.set_status(format!("\"{}\" not found", q));
+                                } else {
+                                    self.set_status("");
+                                }
+                            } else {
+                                self.set_status("");
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::Down => {
+                            let q = if !query.is_empty() {
+                                query.clone()
+                            } else if let Some(ref last) = self.last_search {
+                                last.clone()
+                            } else {
+                                return Ok(());
+                            };
+                            self.last_search = Some(q.clone());
+                            let (found, wrapped) = self.find_next_match_wrapped(&q, true);
+                            if found {
+                                if wrapped {
+                                    self.set_status(format!("Search: \"{}\" [Search wrapped]", q));
+                                } else {
+                                    self.set_status(format!("Search: \"{}\"", q));
+                                }
+                            } else {
+                                self.set_status(format!("\"{}\" not found", q));
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::Esc => {
+                            let (r, c) = *origin;
+                            self.cursor_row = r;
+                            self.cursor_col = c;
+                            self.prompt_state = PromptState::None;
+                            self.set_status("[Search cancelled]");
+                            return Ok(());
+                        }
+                        _ => return Ok(()),
+                    }
+                }
                 PromptState::None => {}
             }
 
@@ -685,6 +1033,14 @@ impl Editor {
                     }
                     KeyCode::Char('u') | KeyCode::Char('U') => {
                         self.paste_line();
+                        return Ok(());
+                    }
+                    KeyCode::Char('w') | KeyCode::Char('W') => {
+                        let origin = (self.cursor_row, self.cursor_col);
+                        self.prompt_state = PromptState::Search {
+                            query: String::new(),
+                            origin,
+                        };
                         return Ok(());
                     }
                     KeyCode::Char('c') | KeyCode::Char('C') => {
@@ -748,8 +1104,32 @@ impl Editor {
                 return Ok(());
             }
 
+            if key.modifiers.contains(KeyModifiers::ALT) && (key.code == KeyCode::Char('w') || key.code == KeyCode::Char('W')) {
+                if let Some(ref q) = self.last_search.clone() {
+                    let (found, wrapped) = self.find_next_match_wrapped(q, true);
+                    if found {
+                        if wrapped {
+                            self.set_status(format!("Search: \"{}\" [Search wrapped]", q));
+                        } else {
+                            self.set_status(format!("Search: \"{}\"", q));
+                        }
+                    } else {
+                        self.set_status(format!("\"{}\" not found", q));
+                    }
+                } else {
+                    self.set_status("No previous search");
+                }
+                return Ok(());
+            }
+
             // Normal typing and editing
             match key.code {
+                KeyCode::Esc => {
+                    if self.last_search.is_some() {
+                        self.last_search = None;
+                        self.set_status("[Search highlights cleared]");
+                    }
+                }
                 KeyCode::Char(c) => {
                     self.insert_char(c);
                 }
@@ -1190,5 +1570,187 @@ mod tests {
         editor.insert_char('(');
         assert_eq!(editor.lines[0], "(");
         assert_eq!(editor.cursor_col, 1);
+    }
+
+    #[test]
+    fn test_find_all_matches_in_line() {
+        let line = "Hello World hello HELLO";
+        let matches = find_all_matches_in_line(line, "hello");
+        assert_eq!(matches, vec![(0, 5), (12, 17), (18, 23)]);
+
+        // Unicode line matching
+        let uni_line = "🦀 Rust code rust 🦀";
+        let uni_matches = find_all_matches_in_line(uni_line, "rust");
+        assert_eq!(uni_matches, vec![(2, 6), (12, 16)]);
+
+        // Empty cases
+        assert!(find_all_matches_in_line("", "test").is_empty());
+        assert!(find_all_matches_in_line("test", "").is_empty());
+    }
+
+    #[test]
+    fn test_find_next_match_and_wrap_around() {
+        let mut editor = Editor::new(None, Config::default());
+        editor.lines = vec![
+            "first line match".to_string(),
+            "second line nothing".to_string(),
+            "third line match here".to_string(),
+        ];
+        editor.cursor_row = 0;
+        editor.cursor_col = 0;
+
+        // 1. Search for "match" starting at (0, 0)
+        let found = editor.find_next_match("match", false);
+        assert!(found);
+        assert_eq!(editor.cursor_row, 0);
+        assert_eq!(editor.cursor_col, 11);
+
+        // 2. Find next match (skip current)
+        let found = editor.find_next_match("match", true);
+        assert!(found);
+        assert_eq!(editor.cursor_row, 2);
+        assert_eq!(editor.cursor_col, 11);
+
+        // 3. Find next match again (wrap around to line 0)
+        let (found, wrapped) = editor.find_next_match_wrapped("match", true);
+        assert!(found);
+        assert!(wrapped);
+        assert_eq!(editor.cursor_row, 0);
+        assert_eq!(editor.cursor_col, 11);
+
+        // 4. Search for nonexistent term
+        let found = editor.find_next_match("nonexistent", false);
+        assert!(!found);
+    }
+
+    #[test]
+    fn test_search_prompt_realtime_and_cancel() {
+        let mut editor = Editor::new(None, Config::default());
+        editor.lines = vec![
+            "fn main() {".to_string(),
+            "    let count = 42;".to_string(),
+            "    println!(\"{}\", count);".to_string(),
+            "}".to_string(),
+        ];
+        editor.cursor_row = 0;
+        editor.cursor_col = 0;
+
+        // Press Ctrl+W to start search
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL,
+            )))
+            .unwrap();
+
+        assert_eq!(
+            editor.prompt_state,
+            PromptState::Search {
+                query: String::new(),
+                origin: (0, 0)
+            }
+        );
+
+        // Type 'c', 'o', 'u', 'n', 't'
+        for ch in "count".chars() {
+            editor
+                .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::NONE,
+                )))
+                .unwrap();
+        }
+
+        // Real-time incremental search jumped to line 1, col 8 ("count")
+        assert_eq!(editor.cursor_row, 1);
+        assert_eq!(editor.cursor_col, 8);
+
+        // Cancel with Esc -> cursor restores to (0, 0)
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+
+        assert_eq!(editor.prompt_state, PromptState::None);
+        assert_eq!(editor.cursor_row, 0);
+        assert_eq!(editor.cursor_col, 0);
+        assert_eq!(editor.status_message, "[Search cancelled]");
+    }
+
+    #[test]
+    fn test_search_prompt_enter_and_repeat_alt_w() {
+        let mut editor = Editor::new(None, Config::default());
+        editor.lines = vec![
+            "let alpha = 1;".to_string(),
+            "let beta = 2;".to_string(),
+            "let alpha_again = 3;".to_string(),
+        ];
+        editor.cursor_row = 0;
+        editor.cursor_col = 0;
+
+        // Start search
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL,
+            )))
+            .unwrap();
+
+        for ch in "alpha".chars() {
+            editor
+                .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::NONE,
+                )))
+                .unwrap();
+        }
+
+        // Press Enter to confirm search
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+
+        assert_eq!(editor.prompt_state, PromptState::None);
+        assert_eq!(editor.last_search, Some("alpha".to_string()));
+        assert_eq!(editor.cursor_row, 0);
+        assert_eq!(editor.cursor_col, 4);
+
+        // Press Alt+W to repeat last search (Find Next)
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('w'),
+                KeyModifiers::ALT,
+            )))
+            .unwrap();
+
+        assert_eq!(editor.cursor_row, 2);
+        assert_eq!(editor.cursor_col, 4);
+
+        // Press Alt+W again -> wraps around to line 0
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('w'),
+                KeyModifiers::ALT,
+            )))
+            .unwrap();
+
+        assert_eq!(editor.cursor_row, 0);
+        assert_eq!(editor.cursor_col, 4);
+
+        // Press Esc in normal mode -> clears search highlights
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+
+        assert_eq!(editor.last_search, None);
+        assert_eq!(editor.status_message, "[Search highlights cleared]");
     }
 }
