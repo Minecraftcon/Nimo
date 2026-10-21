@@ -103,8 +103,23 @@ fn main() -> io::Result<()> {
     while !editor.should_quit {
         editor.render(&mut stdout)?;
 
-        let event = event::read()?;
-        editor.handle_event(event)?;
+        let timeout = if editor.is_waiting_ai() {
+            std::time::Duration::from_millis(80)
+        } else {
+            std::time::Duration::from_millis(250)
+        };
+
+        if event::poll(timeout)? {
+            let ev = event::read()?;
+            editor.handle_event(ev)?;
+        } else if editor.is_waiting_ai() {
+            editor.tick_ai_loading();
+        }
+
+        // Also check if background worker finished while handling events
+        if editor.is_waiting_ai() {
+            editor.tick_ai_loading();
+        }
     }
 
     Ok(())

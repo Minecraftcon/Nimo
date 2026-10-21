@@ -24,6 +24,12 @@ pub enum PromptState {
     Search { query: String, origin: (usize, usize) },
     Help { scroll: usize },
     AiPrompt { range: (usize, usize), input: String },
+    AiLoading {
+        range: (usize, usize),
+        prompt: String,
+        target_lines: Vec<String>,
+        spinner_idx: usize,
+    },
     AiDiffReview {
         range: (usize, usize),
         diff: Vec<DiffItem>,
@@ -145,6 +151,7 @@ pub struct Editor {
     pub prompt_state: PromptState,
     pub last_search: Option<String>,
     pub ai_marker: Option<usize>,
+    pub ai_receiver: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
 }
 
 /// Find all non-overlapping matches of `query` in `line`, case-insensitively.
@@ -294,6 +301,7 @@ impl Editor {
             prompt_state: PromptState::None,
             last_search: None,
             ai_marker: None,
+            ai_receiver: None,
         }
     }
 
@@ -597,38 +605,48 @@ impl Editor {
         }
     }
 
+    pub fn ai_box_bounds(&self, range: (usize, usize)) -> (usize, usize, usize, usize) {
+        let (start, end) = range;
+        let title_len = format!(" Ask Assistant (Lines {}-{}) ", start + 1, end + 1).chars().count();
+        let min_w = (title_len + 8).max(48);
+        let max_w = (self.term_width as usize).saturating_sub(4);
+        let box_w = 64.min(max_w).max(min_w.min(max_w));
+        let box_h = 5;
+        let box_x = (self.term_width as usize).saturating_sub(box_w) / 2;
+        let box_y = (self.term_height as usize).saturating_sub(box_h) / 2;
+        (box_x, box_y, box_w, box_h)
+    }
+
     pub fn render_ai_prompt_box(
         &self,
         stdout: &mut io::Stdout,
         range: (usize, usize),
         input: &str,
+        is_loading: bool,
+        spinner_idx: usize,
     ) -> io::Result<()> {
+        let (box_x, box_y, box_w, _box_h) = self.ai_box_bounds(range);
         let (start, end) = range;
-        let box_w = 60.min((self.term_width as usize).saturating_sub(4)).max(32);
-        let box_h = 5;
-        let box_x = (self.term_width as usize).saturating_sub(box_w) / 2;
-        let box_y = (self.term_height as usize).saturating_sub(box_h) / 2;
-
         let title = format!(" Ask Assistant (Lines {}-{}) ", start + 1, end + 1);
         let title_len = title.chars().count();
-        let border_len = box_w.saturating_sub(title_len + 2);
-        let left_dash = "─";
-        let right_dash = "─".repeat(border_len.saturating_sub(1));
 
-        // Top border
+        let right_dash_len = box_w.saturating_sub(title_len + 3);
+        let right_dash = "─".repeat(right_dash_len);
+
+        // Top border: ╭─ Ask Assistant (Lines X-Y) ───╮
         queue!(
             stdout,
             cursor::MoveTo(box_x as u16, box_y as u16),
             SetBackgroundColor(Palette::SURFACE0),
             SetForegroundColor(Palette::MAUVE)
         )?;
-        write!(stdout, "╭{}", left_dash)?;
+        write!(stdout, "╭─")?;
         queue!(stdout, SetForegroundColor(Palette::PEACH))?;
         write!(stdout, "{}", title)?;
         queue!(stdout, SetForegroundColor(Palette::MAUVE))?;
         write!(stdout, "{}╮", right_dash)?;
 
-        // Content row (Input prompt)
+        // Content row (Input prompt or Spinner waiting)
         queue!(
             stdout,
             cursor::MoveTo(box_x as u16, (box_y + 1) as u16),
@@ -638,34 +656,47 @@ impl Editor {
         write!(stdout, "│ ")?;
 
         let avail_input_w = box_w.saturating_sub(4);
-        if input.is_empty() {
+        if is_loading {
+            const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let spinner = SPINNER_FRAMES[spinner_idx % SPINNER_FRAMES.len()];
+            queue!(stdout, SetForegroundColor(Palette::PEACH))?;
+            write!(stdout, "{} ", spinner)?;
+            queue!(stdout, SetForegroundColor(Palette::TEXT))?;
+            let msg = "Generating modifications with AI...";
+            let msg_avail = avail_input_w.saturating_sub(2);
+            let m_chars: Vec<char> = msg.chars().collect();
+            let m_vis: String = m_chars.into_iter().take(msg_avail).collect();
+            let m_len = m_vis.chars().count();
+            write!(stdout, "{}{}", m_vis, " ".repeat(msg_avail.saturating_sub(m_len)))?;
+        } else if input.is_empty() {
             queue!(stdout, SetForegroundColor(Palette::OVERLAY0))?;
             let placeholder = "Ask assistant...";
-            let p_len = placeholder.chars().count().min(avail_input_w);
-            write!(stdout, "{}", &placeholder[..p_len])?;
-            write!(stdout, "{}", " ".repeat(avail_input_w.saturating_sub(p_len)))?;
+            let p_chars: Vec<char> = placeholder.chars().collect();
+            let p_vis: String = p_chars.into_iter().take(avail_input_w).collect();
+            let p_len = p_vis.chars().count();
+            write!(stdout, "{}{}", p_vis, " ".repeat(avail_input_w.saturating_sub(p_len)))?;
         } else {
             queue!(stdout, SetForegroundColor(Palette::TEXT))?;
-            let display_input: String = input.chars().collect();
-            let in_len = display_input.chars().count();
-            if in_len > avail_input_w {
-                let skip = in_len - avail_input_w;
-                let visible: String = display_input.chars().skip(skip).collect();
-                write!(stdout, "{}", visible)?;
+            let display_chars: Vec<char> = input.chars().collect();
+            let in_len = display_chars.len();
+            let visible: String = if in_len > avail_input_w {
+                display_chars.into_iter().skip(in_len - avail_input_w).collect()
             } else {
-                write!(stdout, "{}{}", display_input, " ".repeat(avail_input_w - in_len))?;
-            }
+                display_chars.into_iter().collect()
+            };
+            let v_len = visible.chars().count();
+            write!(stdout, "{}{}", visible, " ".repeat(avail_input_w.saturating_sub(v_len)))?;
         }
 
         queue!(stdout, SetForegroundColor(Palette::MAUVE))?;
         write!(stdout, " │")?;
 
-        // Divider row
+        // Divider row: ├──────────────┤
         queue!(
             stdout,
             cursor::MoveTo(box_x as u16, (box_y + 2) as u16),
             SetBackgroundColor(Palette::SURFACE0),
-            SetForegroundColor(Palette::SURFACE1)
+            SetForegroundColor(Palette::MAUVE)
         )?;
         write!(stdout, "├{}┤", "─".repeat(box_w.saturating_sub(2)))?;
 
@@ -677,14 +708,31 @@ impl Editor {
             SetForegroundColor(Palette::MAUVE)
         )?;
         write!(stdout, "│ ")?;
-        queue!(stdout, SetForegroundColor(Palette::SUBTEXT0))?;
-        let hint = "Enter: Submit  •  Esc: Cancel";
-        let h_len = hint.chars().count().min(avail_input_w);
-        write!(stdout, "{}{}", &hint[..h_len], " ".repeat(avail_input_w.saturating_sub(h_len)))?;
+
+        if is_loading {
+            queue!(stdout, SetForegroundColor(Palette::PEACH))?;
+            let sent_prefix = "Sent request";
+            write!(stdout, "{}", sent_prefix)?;
+            queue!(stdout, SetForegroundColor(Palette::SUBTEXT0))?;
+            let rest_hint = " • Waiting for response • Esc: Cancel";
+            let h_avail = avail_input_w.saturating_sub(sent_prefix.chars().count());
+            let h_chars: Vec<char> = rest_hint.chars().collect();
+            let h_vis: String = h_chars.into_iter().take(h_avail).collect();
+            let h_len = h_vis.chars().count();
+            write!(stdout, "{}{}", h_vis, " ".repeat(h_avail.saturating_sub(h_len)))?;
+        } else {
+            queue!(stdout, SetForegroundColor(Palette::SUBTEXT0))?;
+            let hint = "Enter: Submit  •  Esc: Cancel";
+            let h_chars: Vec<char> = hint.chars().collect();
+            let h_vis: String = h_chars.into_iter().take(avail_input_w).collect();
+            let h_len = h_vis.chars().count();
+            write!(stdout, "{}{}", h_vis, " ".repeat(avail_input_w.saturating_sub(h_len)))?;
+        }
+
         queue!(stdout, SetForegroundColor(Palette::MAUVE))?;
         write!(stdout, " │")?;
 
-        // Bottom border
+        // Bottom border: ╰──────────────╯
         queue!(
             stdout,
             cursor::MoveTo(box_x as u16, (box_y + 4) as u16),
@@ -824,6 +872,23 @@ impl Editor {
                     )?;
                     write!(stdout, "{}", esc_hint)?;
                 }
+            } else if matches!(self.prompt_state, PromptState::AiLoading { .. }) {
+                queue!(
+                    stdout,
+                    cursor::MoveTo(0, current_terminal_row),
+                    SetBackgroundColor(Palette::MAUVE),
+                    SetForegroundColor(Palette::CRUST)
+                )?;
+                write!(stdout, "{}", " ".repeat(width))?;
+
+                let title = "  NIMO • AI ASSISTANT  [GENERATING CHANGES...]";
+                queue!(
+                    stdout,
+                    cursor::MoveTo(0, current_terminal_row),
+                    SetBackgroundColor(Palette::MAUVE),
+                    SetForegroundColor(Palette::CRUST)
+                )?;
+                write!(stdout, "{}", title)?;
             } else if matches!(self.prompt_state, PromptState::AiDiffReview { .. }) {
                 queue!(
                     stdout,
@@ -1605,6 +1670,11 @@ impl Editor {
                 PromptState::AiPrompt { range, .. } => {
                     format!(" Ask Assistant (Lines {}-{}): Type instruction and press Enter", range.0 + 1, range.1 + 1)
                 }
+                PromptState::AiLoading { range, spinner_idx, .. } => {
+                    const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                    let spin = SPINNER_FRAMES[*spinner_idx % SPINNER_FRAMES.len()];
+                    format!(" [{}] Asking AI assistant (Lines {}-{})... Sent request, waiting for response [Esc Cancel]", spin, range.0 + 1, range.1 + 1)
+                }
                 PromptState::AiDiffReview { range, .. } => {
                     format!(" AI Changes (Lines {}-{}): [^A Accept]  [^D Decline]  [Up/Down Navigate]", range.0 + 1, range.1 + 1)
                 }
@@ -1665,7 +1735,7 @@ impl Editor {
                         ("PgDn", "PgDn"),
                         ("^C", "Cancel"),
                     ],
-                    PromptState::AiPrompt { .. } => [
+                    PromptState::AiPrompt { .. } | PromptState::AiLoading { .. } => [
                         ("Enter", "Submit"),
                         ("Esc", "Cancel"),
                         ("^C", "Cancel"),
@@ -1725,7 +1795,7 @@ impl Editor {
                         ("PgDn", "PgDn"),
                         ("^C", "Cancel"),
                     ],
-                    PromptState::AiPrompt { .. } => [
+                    PromptState::AiPrompt { .. } | PromptState::AiLoading { .. } => [
                         ("Enter", "Submit"),
                         ("Esc", "Cancel"),
                         ("^C", "Cancel"),
@@ -1801,17 +1871,16 @@ impl Editor {
 
         // 5. Render AI Prompt Modal Box if active
         if let PromptState::AiPrompt { range, ref input } = self.prompt_state {
-            self.render_ai_prompt_box(stdout, range, input)?;
+            self.render_ai_prompt_box(stdout, range, input, false, 0)?;
+        } else if let PromptState::AiLoading { range, ref prompt, spinner_idx, .. } = self.prompt_state {
+            self.render_ai_prompt_box(stdout, range, prompt, true, spinner_idx)?;
         }
 
         // 6. Place cursor at exact position
         let (screen_cursor_x, screen_cursor_y) = match &self.prompt_state {
-            PromptState::Help { .. } => (0, 0),
-            PromptState::AiPrompt { input, .. } => {
-                let box_w = 60.min((self.term_width as usize).saturating_sub(4)).max(32);
-                let box_h = 5;
-                let box_x = (self.term_width as usize).saturating_sub(box_w) / 2;
-                let box_y = (self.term_height as usize).saturating_sub(box_h) / 2;
+            PromptState::Help { .. } | PromptState::AiLoading { .. } => (0, 0),
+            PromptState::AiPrompt { range, input } => {
+                let (box_x, box_y, box_w, _box_h) = self.ai_box_bounds(*range);
                 let avail_input_w = box_w.saturating_sub(4);
                 let in_len = input.chars().count();
                 let col_in_box = in_len.min(avail_input_w);
@@ -1889,7 +1958,7 @@ impl Editor {
             }
         };
 
-        if matches!(self.prompt_state, PromptState::Help { .. }) {
+        if matches!(self.prompt_state, PromptState::Help { .. } | PromptState::AiLoading { .. }) {
             queue!(stdout, cursor::Hide)?;
         } else {
             queue!(
@@ -2054,33 +2123,25 @@ impl Editor {
                 let (start, end) = range;
                 let target_lines = self.lines[start..=end.min(self.lines.len().saturating_sub(1))].to_vec();
                 let file_context = self.lines.join("\n");
-                self.set_status("AI assistant thinking...");
-                let mut stdout = io::stdout();
-                let _ = self.render(&mut stdout);
+                let cfg_clone = self.config.clone();
 
-                match ai::call_ai_assistant(&prompt_text, &target_lines, &file_context, &self.config) {
-                    Ok(new_lines) => {
-                        let diff = ai::compute_line_diff(&target_lines, &new_lines);
-                        let first_diff_idx = diff
-                            .iter()
-                            .position(|d| !matches!(d, DiffItem::Unchanged(_)))
-                            .unwrap_or(0);
-                        let sel = start + first_diff_idx;
-                        self.prompt_state = PromptState::AiDiffReview {
-                            range: (start, end),
-                            diff,
-                            new_lines,
-                            original_lines: target_lines,
-                            selected_idx: sel,
-                        };
-                        self.cursor_row = sel;
-                        self.set_status("Review AI changes: [^A Accept]  [^D Decline]  [Up/Down Navigate]");
-                    }
-                    Err(err) => {
-                        self.set_status(format!("AI error: {}", err));
-                        self.prompt_state = PromptState::None;
-                    }
-                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.ai_receiver = Some(rx);
+                self.prompt_state = PromptState::AiLoading {
+                    range,
+                    prompt: prompt_text.clone(),
+                    target_lines: target_lines.clone(),
+                    spinner_idx: 0,
+                };
+                self.set_status("Sent request to AI assistant... waiting for response [Esc Cancel]");
+
+                let prompt_thread = prompt_text;
+                let target_thread = target_lines;
+                std::thread::spawn(move || {
+                    let result = ai::call_ai_assistant(&prompt_thread, &target_thread, &file_context, &cfg_clone);
+                    let _ = tx.send(result);
+                });
+
                 return Ok(());
             }
             _ => return Ok(()),
@@ -2180,6 +2241,61 @@ impl Editor {
         Ok(())
     }
 
+    pub fn is_waiting_ai(&self) -> bool {
+        matches!(self.prompt_state, PromptState::AiLoading { .. })
+    }
+
+    pub fn tick_ai_loading(&mut self) {
+        if let Some(ref rx) = self.ai_receiver {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.ai_receiver = None;
+                    if let PromptState::AiLoading { range, target_lines, .. } = &self.prompt_state {
+                        let (start, end) = *range;
+                        let target_lines = target_lines.clone();
+                        match result {
+                            Ok(new_lines) => {
+                                let diff = ai::compute_line_diff(&target_lines, &new_lines);
+                                let first_diff_idx = diff
+                                    .iter()
+                                    .position(|d| !matches!(d, DiffItem::Unchanged(_)))
+                                    .unwrap_or(0);
+                                let sel = start + first_diff_idx;
+                                self.prompt_state = PromptState::AiDiffReview {
+                                    range: (start, end),
+                                    diff,
+                                    new_lines,
+                                    original_lines: target_lines,
+                                    selected_idx: sel,
+                                };
+                                self.cursor_row = sel;
+                                self.set_status("Review AI changes: [^A Accept]  [^D Decline]  [Up/Down Navigate]");
+                            }
+                            Err(err) => {
+                                self.set_status(format!("AI error: {}", err));
+                                self.prompt_state = PromptState::None;
+                            }
+                        }
+                    } else {
+                        self.prompt_state = PromptState::None;
+                    }
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Still processing in background, advance spinner
+                    if let PromptState::AiLoading { ref mut spinner_idx, .. } = self.prompt_state {
+                        *spinner_idx = spinner_idx.wrapping_add(1);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.ai_receiver = None;
+                    self.prompt_state = PromptState::None;
+                    self.set_status("AI request worker terminated unexpectedly");
+                }
+            }
+        }
+    }
+
     pub fn handle_event(&mut self, event: Event) -> io::Result<()> {
         if let Event::Key(key) = event {
             if matches!(self.prompt_state, PromptState::AiDiffReview { .. }) {
@@ -2187,6 +2303,17 @@ impl Editor {
             }
             if matches!(self.prompt_state, PromptState::AiPrompt { .. }) {
                 return self.handle_ai_prompt(key);
+            }
+            if matches!(self.prompt_state, PromptState::AiLoading { .. }) {
+                if key.code == KeyCode::Esc
+                    || (key.modifiers.contains(KeyModifiers::CONTROL)
+                        && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C')))
+                {
+                    self.ai_receiver = None;
+                    self.prompt_state = PromptState::None;
+                    self.set_status("[AI request cancelled]");
+                }
+                return Ok(());
             }
 
             // Handle prompt states first if active
@@ -2530,7 +2657,10 @@ impl Editor {
                         _ => return Ok(()),
                     }
                 }
-                PromptState::None | PromptState::AiPrompt { .. } | PromptState::AiDiffReview { .. } => {}
+                PromptState::None
+                | PromptState::AiPrompt { .. }
+                | PromptState::AiLoading { .. }
+                | PromptState::AiDiffReview { .. } => {}
             }
 
             // Hotkeys with Ctrl
@@ -3923,6 +4053,77 @@ mod tests {
         assert_eq!(editor.lines[2], "line 3 new");
         assert_eq!(editor.lines[3], "line 4");
         assert!(editor.is_modified);
+    }
+
+    #[test]
+    fn test_ai_box_bounds_alignment() {
+        let mut editor = Editor::new(None, Config::default());
+        editor.term_width = 80;
+        editor.term_height = 24;
+
+        let (box_x, box_y, box_w, box_h) = editor.ai_box_bounds((0, 0));
+        assert_eq!(box_h, 5);
+        assert_eq!(box_w, 64);
+        assert_eq!(box_x, (80 - 64) / 2);
+        assert_eq!(box_y, (24 - 5) / 2);
+
+        // Test narrow terminal
+        editor.term_width = 40;
+        let (n_x, _n_y, n_w, _n_h) = editor.ai_box_bounds((0, 0));
+        assert_eq!(n_w, 36); // max_w = 40 - 4 = 36
+        assert_eq!(n_x, (40 - 36) / 2);
+    }
+
+    #[test]
+    fn test_ai_loading_spinner_and_cancellation() {
+        let mut editor = Editor::new(None, Config::default());
+        let (_tx, rx) = std::sync::mpsc::channel();
+        editor.ai_receiver = Some(rx);
+        editor.prompt_state = PromptState::AiLoading {
+            range: (0, 1),
+            prompt: "add comment".to_string(),
+            target_lines: vec!["let x = 1;".to_string()],
+            spinner_idx: 0,
+        };
+
+        assert!(editor.is_waiting_ai());
+
+        // Tick while empty -> advances spinner
+        editor.tick_ai_loading();
+        if let PromptState::AiLoading { spinner_idx, .. } = editor.prompt_state {
+            assert_eq!(spinner_idx, 1);
+        } else {
+            panic!("Expected AiLoading state");
+        }
+
+        // Cancel with Esc
+        editor
+            .handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+
+        assert!(!editor.is_waiting_ai());
+        assert_eq!(editor.prompt_state, PromptState::None);
+        assert!(editor.ai_receiver.is_none());
+
+        // Test receiving result on tick
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        editor.ai_receiver = Some(rx2);
+        editor.lines = vec!["let x = 1;".to_string()];
+        editor.prompt_state = PromptState::AiLoading {
+            range: (0, 0),
+            prompt: "add comment".to_string(),
+            target_lines: vec!["let x = 1;".to_string()],
+            spinner_idx: 0,
+        };
+
+        tx2.send(Ok(vec!["// comment".to_string(), "let x = 1;".to_string()])).unwrap();
+        editor.tick_ai_loading();
+
+        assert!(matches!(editor.prompt_state, PromptState::AiDiffReview { .. }));
+        assert!(editor.ai_receiver.is_none());
     }
 }
 
